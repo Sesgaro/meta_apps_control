@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Se fusiona con src/main/AndroidManifest.xml solo en el flavor "quest".
+     La app corre como panel 2D en Horizon OS (Meta Quest 3 / 3S). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    xmlns:horizonos="http://schemas.horizonos/sdk">
+
+    <!-- App híbrida: paneles 2D (Flutter) + una actividad inmersiva (la
+         perilla 3D, Spatial SDK) que pueden verse a la vez. -->
+    <horizonos:uses-horizonos-sdk
+        horizonos:minSdkVersion="69"
+        horizonos:targetSdkVersion="69" />
+
+    <!-- El Quest no tiene pantalla táctil: sin esto Android la asume
+         obligatoria y la tienda no la ofrece en el visor. -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <!-- La perilla 3D es inmersiva: seguimiento de cabeza y manos, passthrough. -->
+    <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" />
+    <uses-feature android:name="oculus.software.handtracking" android:required="false" />
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+    <uses-feature android:glEsVersion="0x00030001" />
+
+    <application>
+        <meta-data android:name="com.oculus.handtracking.version" android:value="V2.0" />
+        <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
+        <uses-native-library android:name="libossdk.oculus.so" android:required="true" />
+        <!-- Panel de opciones (conexión, valor, atajos, ajustes). Vertical. -->
+        <activity
+            android:name=".MainActivity"
+            android:resizeableActivity="true"
+            tools:node="merge">
+            <!-- En una app híbrida cada actividad dice si es panel o inmersiva. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="com.oculus.intent.category.2D" />
+            </intent-filter>
+            <layout
+                android:defaultWidth="560dp"
+                android:defaultHeight="860dp"
+                android:minWidth="400dp"
+                android:minHeight="480dp"
+                android:gravity="center" />
+        </activity>
+
+        <!-- Panel de la perilla. Otra afinidad de tarea: Horizon OS lo abre
+             como ventana independiente que se coloca y redimensiona aparte. -->
+        <activity
+            android:name=".KnobActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.sesgaro.control_angulos.quest.knob"
+            android:resizeableActivity="true"
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="com.oculus.intent.category.2D" />
+            </intent-filter>
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+            <layout
+                android:defaultWidth="560dp"
+                android:defaultHeight="660dp"
+                android:minWidth="320dp"
+                android:minHeight="380dp"
+                android:gravity="center" />
+        </activity>
+
+        <!-- Lienzo de dibujo: panel aparte, se abre con el gesto secreto. -->
+        <activity
+            android:name=".CanvasActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.sesgaro.control_angulos.quest.canvas"
+            android:resizeableActivity="true"
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="com.oculus.intent.category.2D" />
+            </intent-filter>
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+            <layout
+                android:defaultWidth="960dp"
+                android:defaultHeight="720dp"
+                android:minWidth="480dp"
+                android:minHeight="400dp"
+                android:gravity="center" />
+        </activity>
+
+        <!-- Perilla 3D: actividad inmersiva (Spatial SDK) con passthrough.
+             Convive con el panel de opciones, que sigue siendo el dueño del BLE. -->
+        <activity
+            android:name=".KnobActivity3D"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.sesgaro.control_angulos.quest.knob3d"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="com.oculus.intent.category.VR" />
+            </intent-filter>
+        </activity>
+
+        <meta-data
+            android:name="com.oculus.supportedDevices"
+            android:value="quest3|quest3s|questpro" />
+    </application>
+</manifest>

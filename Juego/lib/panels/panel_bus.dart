@@ -1,0 +1,37 @@
+import 'package:flutter/services.dart';
+
+/// Mensajes entre el panel 2D (Flutter) y el tablero 3D del Quest
+/// (GameActivity3D, Kotlin nativo).
+///
+/// Son actividades distintas, así que no comparten memoria: el lado nativo
+/// (`PanelBus` en Kotlin) reenvía lo que manda una a la otra. El panel 2D es
+/// el dueño de la conexión BLE; el tablero 3D solo propone movimientos.
+///
+///   3D -> 2D      [hello]     acaba de abrirse, pide el estado
+///   3D -> 2D      [move]      {x, y} en mm, mover la cabeza
+///   3D -> 2D      [newGame]   partida nueva
+///   2D -> 3D      [game]      estado del juego, ver GameState.toMap()
+///   2D -> nativo  [openGame3d] / [closeGame3d] abre o cierra el tablero 3D
+class PanelBus {
+  PanelBus._();
+
+  static const _channel = MethodChannel('control_angulos/panels');
+
+  static const hello = 'hello';
+  static const move = 'move';
+  static const newGame = 'newGame';
+  static const game = 'game';
+  static const openGame3d = 'openGame3d';
+  static const closeGame3d = 'closeGame3d';
+
+  static void listen(void Function(String method, Map args) onMessage) {
+    _channel.setMethodCallHandler((call) async {
+      onMessage(call.method, (call.arguments as Map?) ?? const {});
+    });
+  }
+
+  static void send(String method, [Map<String, Object?>? args]) {
+    // Si el otro panel está cerrado el mensaje simplemente se pierde.
+    _channel.invokeMethod<void>(method, args).ignore();
+  }
+}

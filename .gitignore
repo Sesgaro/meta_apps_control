@@ -1,0 +1,65 @@
+# Un solo .gitignore para todo el repo. Las reglas que empiezan con /*/ son
+# las de cada proyecto de Flutter (Perilla_Flutter/, Juego/).
+
+# --- Varios -------------------------------------------------------------------
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# --- IntelliJ / Android Studio -----------------------------------------------
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# --- Flutter / Dart ----------------------------------------------------------
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+.widget_preview/
+/*/build/
+/*/coverage/
+app.*.symbols
+app.*.map.json
+
+# --- Android ------------------------------------------------------------------
+/*/android/app/debug
+/*/android/app/profile
+/*/android/app/release
+/*/android/.gradle
+/*/android/captures/
+/*/android/gradlew
+/*/android/gradlew.bat
+/*/android/local.properties
+gradle-wrapper.jar
+GeneratedPluginRegistrant.java
+.cxx/
+# Nunca subas tu keystore: https://flutter.dev/to/reference-keystore
+key.properties
+**/*.keystore
+**/*.jks
+
+# --- Firmware -------------------------------------------------------------------
+# Binarios que exporta el Arduino IDE junto al sketch.
+/*/firmware/**/build/
+# PlatformIO (Juego/firmware/esp32_eje_y).
+.pio/
+# Binario de las pruebas del gato (Juego/firmware/pruebas).
+/Juego/firmware/pruebas/test_gato
+
+# --- Referencias ----------------------------------------------------------------
+# Copia de consulta del repo original del eje Y (tiene su propio .git):
+# https://github.com/santi-bnt/Analysis-of-Control-Systems
+/Juego/referencia/

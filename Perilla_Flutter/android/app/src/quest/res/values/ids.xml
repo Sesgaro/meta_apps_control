@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Panel con el valor en grados sobre la perilla 3D. -->
+    <item name="knob3d_label" type="id" />
+    <!-- Botón "Volver a 2D" bajo la perilla 3D. -->
+    <item name="knob3d_back" type="id" />
+</resources>

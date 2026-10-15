@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Paneles del tablero 3D (GameActivity3D). -->
+    <item name="game3d_status" type="id" />
+    <item name="game3d_new" type="id" />
+    <item name="game3d_back" type="id" />
+</resources>
