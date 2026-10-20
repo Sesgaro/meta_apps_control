@@ -63,3 +63,6 @@ key.properties
 # Copia de consulta del repo original del eje Y (tiene su propio .git):
 # https://github.com/santi-bnt/Analysis-of-Control-Systems
 /Juego/referencia/
+
+# --- graphify -------------------------------------------------------------------
+graphify-out/

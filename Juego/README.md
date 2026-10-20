@@ -14,8 +14,8 @@ viene de [Analysis-of-Control-Systems](https://github.com/santi-bnt/Analysis-of-
 ```
  Quest 1 ─┐ BLE                       UART (TX/RX/GND)
  Quest 2 ─┴──► ESP32-S3 ◄─────────────────────────► ESP32 normal
-               · árbitro: turnos, reloj, tablero     · motor eje Y (husillo T8)
-               · motor eje X (banda/cremallera)      · matriz IR 3×3
+               · árbitro: turnos, reloj, tablero     · motor eje Y (cremallera)
+               · motor eje X (husillo T8)            · matriz IR 3×3
                · BLE para los visores                · posición + qué sensor ve la cabeza
 ```
 
@@ -36,17 +36,35 @@ viene de [Analysis-of-Control-Systems](https://github.com/santi-bnt/Analysis-of-
 2. En cada Quest abre **Gato cartesiano**, toca **Conectar** →
    `ESP32S3-Gato`, y elige **Jugador X** o **Jugador O** (uno cada visor).
 3. **Nuevo juego**. Quien empieza se alterna entre partidas.
-4. **Abrir tablero 3D**: aparece una mesa con el tablero frente a ti. En tu
-   turno la mesa se ve rosa: pellizca la cabeza naranja y arrástrala; los
-   motores la siguen. Cuando no es tu turno, la cabeza no se deja agarrar.
-5. Al acabar el tiempo (20 s) la ESP espera a que la cabeza se detenga y lee
+4. Elige el **Modo de juego** en el panel. El tablero 3D se abre solo al
+   conectar (o con **Abrir tablero 3D**): una mesa frente a ti, que en tu turno
+   se ve rosa. Se juega solo con las manos:
+   - **Resortera**: agarra la pelota roja, jálala hacia ti y suéltala. Mientras
+     apuntas, unos puntos marcan la trayectoria y la cabeza de la máquina va a
+     donde caería. Al soltar se tira el turno: si la matriz IR ve la cabeza en
+     una casilla libre la pelota se cuela por un hueco; si no, rebota.
+   - **Grúa**: inclina el joystick (izquierda) para mover la cabeza y aprieta
+     el botón rojo (derecha) para soltar la garra y tirar.
+   Las fichas usan los modelos `PiezaX.stl` / `PiezaO.stl`; si los cambias,
+   regenera los GLB con `python3 tool/stl_a_glb.py`.
+   **Dos visores**: para que los dos vean el tablero en el mismo lugar, cada
+   uno toca **Calibrar**, pone el marcador cian en la esquina izquierda de su
+   lado del tablero y el amarillo en la derecha, y toca **Listo** (los dos
+   sobre los mismos dos puntos reales; sin tablero sirven dos marcas en una
+   mesa). Cada visor manda su cabeza y manos por la S3 y ve al otro como
+   esferas del color de su ficha. En la simulación ves tu propio reflejo al
+   otro lado del tablero.
+5. Al tirar, o si se acaba el tiempo (20 s), la ESP espera a que la cabeza se detenga y lee
    los sensores: baldosa verde = ficha puesta, roja = falló u ocupada; azul =
    la casilla que ve la matriz IR en ese momento.
 6. **Volver a 2D** regresa al panel (la escena 3D oculta las ventanas 2D; el
-   panel sigue conectado en segundo plano).
+   panel sigue conectado en segundo plano). Al abrir el 3D el panel se
+   minimiza solo, porque mientras está al frente las manos no llegan al 3D.
 
-El panel 2D también sirve para jugar (arrastrando sobre el tablero plano), así
-que funciona en el teléfono (`flutter run`) y para probar sin entrar al 3D.
+En el Quest solo se juega en 3D. El teléfono es espectador: ve el tablero 2D
+y la partida, pero no mueve la cabeza ni empieza partidas. **Probar sin ESP**
+(en el Quest) simula la máquina para ver el juego sin hardware; ahí un solo
+visor juega con las dos fichas.
 
 ## Cableado
 
@@ -81,11 +99,11 @@ que funciona en el teléfono (`flutter run`) y para probar sin entrar al 3D.
 
 | Constante | Dónde | Valor actual |
 |---|---|---|
-| `MM_POR_VUELTA_X` | `esp32s3_gato.ino` | 40 mm (GT2, polea 20 dientes de la BIQU B1) |
-| `MM_POR_VUELTA` | `esp32_eje_y/include/Config.h` | 8 mm (husillo T8 del eje Z de la B1) |
+| `MM_POR_VUELTA_X` | `esp32s3_gato.ino` | 8 mm (husillo T8 del eje Z de la B1) |
+| `MM_POR_VUELTA` | `esp32_eje_y/include/Config.h` | 40 mm (GT2, polea 20 dientes de la BIQU B1) |
 | `X_MIN/X_MAX`, `Y_MIN/Y_MAX` | S3 (y `MIN/MAX_POSITION_MM` en la normal) | 0–180 mm |
 | `X_CASILLA0`, `X_PASO`, `Y_CASILLA0`, `Y_PASO` | S3 | centro 30 mm, paso 60 mm |
-| `turnoMs`, `quietoMs`, `resolverMaxMs` | S3 (`juego`) | 20 s, 0.3 s, 4 s |
+| `turnoMs`, `quietoMs`, `resolverMaxMs` | S3 (`juego`) | 20 s, 0.3 s, 12 s |
 | `TOLERANCIA_MM` | S3 | 2 mm |
 | `IR_PINES`, `IR_ACTIVO` | normal, `Config.h` | ver arriba |
 
@@ -96,7 +114,7 @@ El control de cada eje sigue en grados del motor (las ganancias PID valen
 igual) y solo la frontera convierte mm ↔ grados. El PID del eje X es el
 ajustado en `App` (kp 7.6, ki 51, kd 0.135) y el del eje Y el del repo
 original (kp 4.51, ki 21.0, kd 0.18): conviene verificarlos con la carga de
-cada carro. El eje Y (8 mm/vuelta) avanza ~17 mm/s, por eso el turno es de 20 s.
+cada carro. El eje X (husillo, 8 mm/vuelta) avanza ~17 mm/s, por eso el turno es de 20 s.
 
 ## Protocolos
 
@@ -104,7 +122,12 @@ cada carro. El eje Y (8 mm/vuelta) avanza ~17 mm/s, por eso el turno es de 20 s.
 
 - Comandos (`7a1d1001-…`, escritura sin respuesta):
   `C0 jugador xLo xHi yLo yHi` (int16 en décimas de mm; solo cuenta en el
-  turno de ese jugador) y `C1 01` (partida nueva).
+  turno de ese jugador), `C1 01` (partida nueva) y `C2 jugador` (tirar:
+  termina el turno ya y se lee el IR).
+- Poses, `7a1d1003` (escritura sin respuesta + notificación): `D0 jugador`
+  + 28 bytes con cabeza, manos y pelota de un visor en mm del tablero (ver
+  `lib/ble/pose_frame.dart`). La S3 no las interpreta: guarda la última de
+  cada jugador y la reenvía a todos a 20 Hz.
 - Estado (`7a1d1002-…`, lectura + notificación cada 100 ms, 45 bytes): fase,
   turno, tiempo restante, tablero, ganador, último tiro, posición y referencia
   de X/Y, casilla IR, enlace UART y la geometría del tablero.

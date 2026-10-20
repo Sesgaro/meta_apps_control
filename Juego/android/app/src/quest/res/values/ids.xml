@@ -4,4 +4,5 @@
     <item name="game3d_status" type="id" />
     <item name="game3d_new" type="id" />
     <item name="game3d_back" type="id" />
+    <item name="game3d_calib" type="id" />
 </resources>

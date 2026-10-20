@@ -3,8 +3,8 @@
 //
 //   Quest 1 ─┐ BLE                    UART
 //   Quest 2 ─┴──► ESP32-S3 ◄─────────────────► ESP32 normal
-//                 · reglas (gato.h)              · eje Y (husillo)
-//                 · eje X (banda / cremallera)   · matriz IR 3×3
+//                 · reglas (gato.h)              · eje Y (cremallera)
+//                 · eje X (husillo)              · matriz IR 3×3
 //
 // Cada eje se controla en milímetros: el PID trabaja en grados del motor (las
 // ganancias ajustadas valen igual) y la frontera convierte con el avance por
@@ -23,6 +23,7 @@
 #define SERVICE_UUID      "7a1d1000-5e2f-4b8a-9c3d-2f1e0a6b4c11"
 #define COMMAND_CHAR_UUID "7a1d1001-5e2f-4b8a-9c3d-2f1e0a6b4c11"
 #define STATE_CHAR_UUID   "7a1d1002-5e2f-4b8a-9c3d-2f1e0a6b4c11"
+#define POSE_CHAR_UUID    "7a1d1003-5e2f-4b8a-9c3d-2f1e0a6b4c11"
 
 // Motor del eje X
 #define EN_L  14
@@ -38,9 +39,9 @@
 const unsigned long UART_BAUD = 115200;
 
 // --- Geometría (calibrar en la máquina) ------------------------------------
-// Eje X: banda GT2 con polea de 20 dientes (el X de una BIQU B1) = 40 mm por
-// vuelta del eje de salida del motor; equivale a un piñón-cremallera.
-const float MM_POR_VUELTA_X = 40.0;
+// Eje X: husillo (el eje Z de una BIQU B1: T8) = 8 mm por vuelta del eje de
+// salida del motor (paso × entradas). Si hay otra reducción, inclúyela.
+const float MM_POR_VUELTA_X = 8.0;
 // Recorrido útil de cada eje. La posición al encender es 0 mm (encoders
 // incrementales): enciende con la cabeza en la esquina mínima (X e Y).
 const float X_MIN = 0, X_MAX = 180;
@@ -54,9 +55,9 @@ const float TOLERANCIA_MM = 2.0;
 // --- Juego ---------------------------------------------------------------------
 gato::Juego juego([] {
   gato::Config c;
-  c.turnoMs = 20000;       // el husillo del eje Y avanza ~17 mm/s
+  c.turnoMs = 20000;       // el husillo del eje X avanza ~17 mm/s
   c.quietoMs = 300;
-  c.resolverMaxMs = 4000;
+  c.resolverMaxMs = 12000;  // tras tirar, X puede recorrer los 180 mm
   return c;
 }());
 
@@ -65,6 +66,7 @@ gato::Juego juego([] {
 //   C0 jugador xLo xHi yLo yHi   mover la cabeza; int16 en décimas de mm.
 //                                Solo cuenta si es el turno de ese jugador.
 //   C1 01                        partida nueva
+//   C2 jugador                   tirar: termina el turno ya y se lee el IR
 // Estado, característica de estado (lectura + notificación cada 100 ms):
 //   [0] C6  [1] fase  [2] turno  [3..4] tiempo restante (décimas de s)
 //   [5..13] tablero (0 vacía, 1 X, 2 O)  [14] ganador (3 = empate)
@@ -74,13 +76,22 @@ gato::Juego juego([] {
 //   [27] banderas: bit0 = enlace UART con la ESP32 normal
 //   [28..35] xMin xMax yMin yMax  [36..43] xCasilla0 xPaso yCasilla0 yPaso
 //   [44] duración del turno (s)
+// Poses, característica de poses (escritura sin respuesta + notificación):
+//   D0 jugador ... (30 bytes) cabeza, manos y pelota de un visor en mm del
+//   tablero (ver lib/ble/pose_frame.dart). La ESP no las interpreta: guarda
+//   la última de cada jugador y la reenvía a todos, así cada visor ve al otro.
 constexpr uint8_t CMD_MOVER = 0xC0;
 constexpr uint8_t CMD_JUEGO = 0xC1;
+constexpr uint8_t CMD_TIRAR = 0xC2;
 constexpr uint8_t STATE_HEADER = 0xC6;
 constexpr size_t STATE_LENGTH = 45;
+constexpr uint8_t POSE_HEADER = 0xD0;
+constexpr size_t POSE_LENGTH = 30;
+constexpr unsigned long POSE_MS = 50;  // reenvío: 20 Hz como máximo
 
 static BLEServer *bleServer = nullptr;
 static BLECharacteristic *stateChar = nullptr;
+static BLECharacteristic *poseChar = nullptr;
 static volatile bool needAdvertising = false;
 
 // Lo escribe la tarea BLE y lo lee loop().
@@ -89,6 +100,10 @@ static float pedidoX = 0, pedidoY = 0;
 static uint8_t pedidoJugador = 0;
 static bool hayPedido = false;
 static bool pedirPartida = false;
+static uint8_t tiroJugador = 0;   // 0 = nadie tiró
+// Última pose de cada jugador (índice = jugador - 1) y si falta reenviarla.
+static uint8_t poses[2][POSE_LENGTH];
+static bool poseNueva[2] = {false, false};
 
 // Referencias vigentes de la cabeza, en mm.
 static float refX = 0, refY = 0;
@@ -318,6 +333,10 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
       pedidoY = y / 10.0f;
       hayPedido = true;
       portEXIT_CRITICAL(&bloqueo);
+    } else if (len == 2 && d[0] == CMD_TIRAR) {
+      portENTER_CRITICAL(&bloqueo);
+      tiroJugador = d[1];
+      portEXIT_CRITICAL(&bloqueo);
     } else if (len == 2 && d[0] == CMD_JUEGO && d[1] == 0x01) {
       portENTER_CRITICAL(&bloqueo);
       pedirPartida = true;
@@ -325,6 +344,33 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
     }
   }
 };
+
+class PoseCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *characteristic) override {
+    const uint8_t *d = characteristic->getData();
+    if (characteristic->getLength() != POSE_LENGTH || d[0] != POSE_HEADER) return;
+    if (d[1] != gato::JUGADOR_X && d[1] != gato::JUGADOR_O) return;
+    portENTER_CRITICAL(&bloqueo);
+    memcpy(poses[d[1] - 1], d, POSE_LENGTH);
+    poseNueva[d[1] - 1] = true;
+    portEXIT_CRITICAL(&bloqueo);
+  }
+};
+
+/// Reenvía a todos las poses que llegaron desde la última vez.
+static void reenviarPoses() {
+  for (int i = 0; i < 2; i++) {
+    uint8_t f[POSE_LENGTH];
+    portENTER_CRITICAL(&bloqueo);
+    const bool nueva = poseNueva[i];
+    if (nueva) memcpy(f, poses[i], POSE_LENGTH);
+    poseNueva[i] = false;
+    portEXIT_CRITICAL(&bloqueo);
+    if (!nueva || bleServer->getConnectedCount() == 0) continue;
+    poseChar->setValue(f, POSE_LENGTH);
+    poseChar->notify();
+  }
+}
 
 class ServerCallbacks : public BLEServerCallbacks {
   // NimBLE deja de anunciar al conectarse alguien; se reanuda para que el
@@ -346,6 +392,9 @@ static void setupBle() {
   cmd->setCallbacks(new CommandCallbacks());
   stateChar = service->createCharacteristic(
       STATE_CHAR_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  poseChar = service->createCharacteristic(
+      POSE_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE_NR | BLECharacteristic::PROPERTY_NOTIFY);
+  poseChar->setCallbacks(new PoseCallbacks());
   service->start();
 
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
@@ -364,7 +413,9 @@ static void atenderComandos(unsigned long ahora) {
   const bool pedido = hayPedido;
   const uint8_t jugador = pedidoJugador;
   const float x = pedidoX, y = pedidoY;
+  const uint8_t tiro = tiroJugador;
   pedirPartida = hayPedido = false;
+  tiroJugador = 0;
   portEXIT_CRITICAL(&bloqueo);
 
   if (partida) juego.nueva(ahora);
@@ -372,6 +423,8 @@ static void atenderComandos(unsigned long ahora) {
     refX = constrain(x, X_MIN, X_MAX);
     refY = constrain(y, Y_MIN, Y_MAX);
   }
+  // Después del movimiento: el último pedido del tiro ya es la referencia.
+  if (tiro) juego.tirar(tiro, ahora);
 }
 
 static bool cabezaQuieta() {
@@ -379,6 +432,7 @@ static bool cabezaQuieta() {
 }
 
 void setup() {
+  Serial.begin(115200);
   pinMode(EN_R, OUTPUT);
   pinMode(EN_L, OUTPUT);
   pinMode(PWM_L, OUTPUT);
@@ -398,6 +452,7 @@ void loop() {
   static unsigned long lastSample = millis();
   static unsigned long lastState = 0;
   static unsigned long lastUart = 0;
+  static unsigned long lastPose = 0;
 
   if (needAdvertising) {
     needAdvertising = false;
@@ -427,5 +482,9 @@ void loop() {
   if (now - lastState >= STATE_MS) {
     lastState = now;
     publicarEstado(now);
+  }
+  if (now - lastPose >= POSE_MS) {
+    lastPose = now;
+    reenviarPoses();
   }
 }

@@ -7,6 +7,8 @@
 ///                                décimas de mm. La ESP solo lo acepta si es
 ///                                el turno de ese jugador.
 ///   C1 01                        partida nueva
+///   C2 jugador                   tirar: termina el turno ya (lanzar la
+///                                pelota / soltar la garra) y se lee el IR
 ///
 /// Estado, en [stateCharUuid] (lectura + notificación cada 100 ms), 45 bytes
 /// little-endian; ver [GameState].
@@ -25,8 +27,12 @@ class GameProtocol {
   static final commandCharUuid = Guid('7a1d1001-5e2f-4b8a-9c3d-2f1e0a6b4c11');
   static final stateCharUuid = Guid('7a1d1002-5e2f-4b8a-9c3d-2f1e0a6b4c11');
 
+  /// Poses de los visores (ver PoseFrame); opcional en firmwares viejos.
+  static final poseCharUuid = Guid('7a1d1003-5e2f-4b8a-9c3d-2f1e0a6b4c11');
+
   static const moveHeader = 0xC0;
   static const gameHeader = 0xC1;
+  static const fireHeader = 0xC2;
   static const stateHeader = 0xC6;
   static const stateLength = 45;
 
@@ -39,6 +45,9 @@ class GameProtocol {
       ..setInt16(4, _tenths(yMm), Endian.little);
     return d.buffer.asUint8List();
   }
+
+  static Uint8List encodeFire(Player player) =>
+      Uint8List.fromList([fireHeader, player.code]);
 
   static Uint8List encodeNewGame() => Uint8List.fromList([gameHeader, 0x01]);
 

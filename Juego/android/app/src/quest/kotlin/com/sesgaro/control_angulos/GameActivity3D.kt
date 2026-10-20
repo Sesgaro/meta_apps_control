@@ -16,12 +16,17 @@ import com.meta.spatial.core.Color4
 import com.meta.spatial.core.ComponentBase
 import com.meta.spatial.core.Entity
 import com.meta.spatial.core.Pose
-import com.meta.spatial.core.Quaternion
 import com.meta.spatial.core.Query
+import com.meta.spatial.core.Quaternion
 import com.meta.spatial.core.SpatialFeature
 import com.meta.spatial.core.SystemBase
 import com.meta.spatial.core.Vector3
-import com.meta.spatial.runtime.ButtonBits
+import com.meta.spatial.isdk.IsdkFeature
+import com.meta.spatial.isdk.IsdkGrabFilter
+import com.meta.spatial.isdk.IsdkGrabMovementType
+import com.meta.spatial.isdk.IsdkGrabState
+import com.meta.spatial.isdk.IsdkGrabbable
+import com.meta.spatial.isdk.IsdkSphereCollider
 import com.meta.spatial.runtime.ReferenceSpace
 import com.meta.spatial.toolkit.AppSystemActivity
 import com.meta.spatial.toolkit.AvatarBody
@@ -32,6 +37,7 @@ import com.meta.spatial.toolkit.Material
 import com.meta.spatial.toolkit.Mesh
 import com.meta.spatial.toolkit.PanelRegistration
 import com.meta.spatial.toolkit.QuadShapeOptions
+import com.meta.spatial.toolkit.Scale
 import com.meta.spatial.toolkit.Sphere
 import com.meta.spatial.toolkit.Transform
 import com.meta.spatial.toolkit.TransformParent
@@ -42,15 +48,28 @@ import com.meta.spatial.toolkit.createPanelEntity
 import com.meta.spatial.vr.VRFeature
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.min
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /// Tablero 3D del gato en el Quest: una mesa virtual frente al usuario, sobre
 /// el passthrough, con la cuadrícula a escala de la máquina, las fichas, la
 /// casilla que ve la matriz IR y la cabeza en su posición real.
 ///
-/// En tu turno, pellizca la cabeza y arrástrala sobre el tablero: los motores
-/// X/Y la siguen. Solo manos. No conecta nada:
-/// propone movimientos al panel 2D (dueño del BLE) por [PanelBus] y dibuja el
+/// Dos modos (los elige el panel 2D, `mode`):
+///  - Resortera: jalas la pelota y la cabeza va a donde caería. Al soltar, la
+///    pelota vuela y se pide "tirar"; si la matriz IR ve la cabeza en una
+///    casilla libre la pelota se cuela por un hueco, si no rebota y se va.
+///  - Grúa: un joystick mueve la cabeza y un botón suelta la garra (tirar).
+///
+/// Dos visores: cada uno calibra el tablero sobre los mismos dos puntos reales
+/// (botón Calibrar: se agarran dos marcadores y se ponen en las esquinas de
+/// tu lado del tablero, izquierda y derecha). Así los dos miden en mm de la
+/// máquina y cada uno manda su cabeza y manos (PoseFrame) por la ESP; aquí se
+/// dibuja al otro jugador.
+///
+/// Solo manos (agarre del Interaction SDK). No conecta nada: propone
+/// movimientos y tiros al panel 2D (dueño del BLE) por [PanelBus] y dibuja el
 /// estado que este le reenvía.
 class GameActivity3D : AppSystemActivity() {
 
@@ -58,14 +77,32 @@ class GameActivity3D : AppSystemActivity() {
     /// lee el sistema de la escena.
     @Volatile private var game: Map<*, *> = emptyMap<Any, Any>()
 
+    /// Última pose del otro visor y cuándo llegó (System.nanoTime).
+    @Volatile private var remotePose: ByteArray? = null
+    @Volatile private var remoteAt = 0L
+
     private val busListener: (String, Map<*, *>) -> Unit = { method, args ->
-        if (method == "game") game = args
+        when (method) {
+            "game" -> game = args
+            "poses" -> (args["data"] as? ByteArray)?.let {
+                remotePose = it
+                remoteAt = System.nanoTime()
+            }
+        }
     }
 
     private val scene3d = BoardScene()
     private var status: TextView? = null
+    private var calibButton: Button? = null
 
-    override fun registerFeatures(): List<SpatialFeature> = listOf(VRFeature(this))
+    /// Lo pide el botón Calibrar; lo atiende el sistema de la escena.
+    @Volatile private var calibToggle = false
+
+    override fun registerFeatures(): List<SpatialFeature> = listOf(
+        VRFeature(this),
+        // Manos del Interaction SDK: agarre de la pelota, el joystick y el botón.
+        IsdkFeature(this, spatial, systemManager),
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -113,9 +150,10 @@ class GameActivity3D : AppSystemActivity() {
         button(R.id.game3d_new, "Nuevo juego") { PanelBus.send(this, "newGame") },
         // La escena inmersiva oculta las ventanas 2D: este botón regresa a ellas.
         button(R.id.game3d_back, "Volver a 2D") { backTo2d() },
+        button(R.id.game3d_calib, "Calibrar", { calibButton = it }) { calibToggle = true },
     )
 
-    private fun button(id: Int, label: String, onClick: () -> Unit) = ViewPanelRegistration(
+    private fun button(id: Int, label: String, onView: (Button) -> Unit = {}, onClick: () -> Unit) = ViewPanelRegistration(
         id,
         { _, ctx ->
             Button(ctx).apply {
@@ -131,7 +169,7 @@ class GameActivity3D : AppSystemActivity() {
             }
         },
         { _ -> UIPanelSettings(QuadShapeOptions(0.14f, 0.045f)) },
-        { _: View, _, _ -> },
+        { view: View, _, _ -> onView(view as Button) },
     )
 
     /// Regresa a las ventanas 2D: vuelve al inicio con el panel 2D al frente,
@@ -187,45 +225,88 @@ class GameActivity3D : AppSystemActivity() {
     private fun canMove() =
         game["connected"] == true && int("phase") == 1 && int("turn") == int("me")
 
+    private fun clawMode() = int("mode") == 1
+
     // --- Escena -------------------------------------------------------------------
 
     /// La mesa virtual. Todo cuelga de [root]: su +Z apunta al usuario, +X a su
     /// derecha. El eje X de la máquina va a la derecha y el Y se aleja del
-    /// usuario (-Z), como si viera la máquina desde el frente.
+    /// usuario (-Z), como si viera la máquina desde el frente. La resortera,
+    /// el joystick y el botón quedan en el borde de tu lado.
+    ///
+    /// Lo que se agarra (pelota, perilla del joystick, botón) va suelto en la
+    /// escena, sin padre, para que el agarre lo mueva en coordenadas del mundo.
     private inner class BoardScene {
         lateinit var root: Entity
         lateinit var head: Entity
         lateinit var target: Entity
         lateinit var base: Entity
         private val tiles = mutableListOf<Entity>()
-        private val headParts = mutableListOf<Entity>()
-        private val crosses = mutableListOf<List<Entity>>()
-        private val rings = mutableListOf<List<Entity>>()
-        private var geo: Geometry? = null
+        private val holes = mutableListOf<Entity>()
+        private val pieces = mutableListOf<Pair<Entity, Entity>>()
+        lateinit var geo: Geometry
 
         var rootPose = Pose(Vector3(0f, -10f, 0f), Quaternion())
         var placed = false
         var built = false
-        var dragging = false
+
+        /// Escala de la mesa: la calibración la ajusta a la distancia real
+        /// entre los dos puntos (1 con el tablero de verdad).
+        var scale = 1f
+        var calibrated = false
+        var calibrating = false
+        lateinit var markA: Entity
+        lateinit var markB: Entity
+        var boardW = 0f
+
+        // El otro jugador.
+        private val avatar = mutableListOf<Entity>()
+        private var avatarColor = -1
 
         /// Metros por mm: el tablero mide [BOARD_M] de ancho.
         var k = 0.001f
         var cx = 0f
         var cy = 0f
+        var halfH = 0f
+
+        // Resortera.
+        lateinit var ball: Entity
+        lateinit var slingRest: Vector3
+        private lateinit var forkL: Vector3
+        private lateinit var forkR: Vector3
+        private val bands = mutableListOf<Entity>()
+        private val dots = mutableListOf<Entity>()
+        private val slingParts = mutableListOf<Entity>()
+
+        // Grúa.
+        lateinit var knob: Entity
+        lateinit var knobRest: Vector3
+        lateinit var button: Entity
+        lateinit var buttonAt: Vector3
+        private val stick = mutableListOf<Entity>()
+        private val clawParts = mutableListOf<Entity>()
+        private val headParts = mutableListOf<Entity>()
+
+        /// Altura de la cabeza sobre la mesa (la garra sube y baja).
+        var headLift = HEAD_LIFT
 
         private var baseLook = -1
-        private var headLook = -1
+        private var modeLook = -1
         private val tileLook = IntArray(9) { -1 }
         private val pieceLook = IntArray(9) { -1 }
 
         fun local(xMm: Float, yMm: Float, lift: Float = 0f) =
             Vector3((xMm - cx) * k, lift, -(yMm - cy) * k)
 
-        /// Punto en la escena -> mm de la máquina, proyectado sobre la mesa.
-        fun toMm(world: Vector3): Pair<Float, Float> {
-            val l = rootPose.inverse() * world
-            return (cx + l.x / k) to (cy - l.z / k)
-        }
+        /// Punto local de la mesa -> mm de la máquina.
+        fun toMm(l: Vector3): Pair<Float, Float> = (cx + l.x / k) to (cy - l.z / k)
+
+        fun toLocal(world: Vector3) = (rootPose.inverse() * world) * (1f / scale)
+        fun toWorld(l: Vector3) = rootPose * (l * scale)
+
+        /// Punto local -> mm del tablero (x, y de la máquina; h = altura).
+        fun toBoardMm(l: Vector3) = Triple(cx + l.x / k, cy - l.z / k, l.y / k)
+        fun fromBoardMm(x: Float, y: Float, h: Float) = Vector3((x - cx) * k, h * k, -(y - cy) * k)
 
         /// Se arma una vez, cuando llega la geometría de la ESP.
         fun build(g: Geometry) {
@@ -235,6 +316,8 @@ class GameActivity3D : AppSystemActivity() {
             cy = (g.bottom + g.top) / 2
             val w = (g.right - g.left) * k
             val h = (g.top - g.bottom) * k
+            halfH = h / 2
+            boardW = w
             val cell = minOf(g.xStep, g.yStep) * k
 
             root = Entity.create(listOf(Transform(rootPose)))
@@ -251,77 +334,243 @@ class GameActivity3D : AppSystemActivity() {
                 // Baldosa: se ilumina con el sensor IR o el último tiro.
                 val half = cell * 0.44f
                 tiles += box(root, center + Vector3(-half, 0.0005f, -half), center + Vector3(half, 0.002f, half), IR, Visible(false))
+                // Hueco por donde se cuela la pelota.
+                val hole = cell * 0.2f
+                holes += box(root, center + Vector3(-hole, 0.0005f, -hole), center + Vector3(hole, 0.003f, hole), HOLE, Visible(false))
                 // Sensor IR al centro de la casilla.
                 sphere(root, center + Vector3(0f, 0.002f, 0f), cell * 0.04f, GRID)
-                // X: dos barras cruzadas.
-                val len = cell * 0.36f
-                val thick = cell * 0.06f
-                crosses += listOf(45f, -45f).map { a ->
-                    Entity.create(
-                        listOf(
-                            Mesh(Uri.parse("mesh://box")),
-                            Box(Vector3(-len, 0f, -thick), Vector3(len, cell * 0.08f, thick)),
-                            material(PIECE_X),
-                            Transform(Pose(center + Vector3(0f, 0.004f, 0f), yaw(a))),
-                            TransformParent(root),
-                            Visible(false),
-                        ),
-                    )
-                }
-                // O: anillo de esferas.
-                rings += (0 until 14).map { i ->
-                    val t = i * 2 * Math.PI.toFloat() / 14
-                    sphere(root, center + Vector3(cos(t) * cell * 0.3f, 0.02f, sin(t) * cell * 0.3f), cell * 0.055f, PIECE_O, Visible(false))
-                }
+                // Fichas: los modelos PiezaX/PiezaO (1 m de ancho, ver tool/stl_a_glb.py).
+                pieces += piece("pieza_x", center, cell * 0.7f) to piece("pieza_o", center, cell * 0.6f)
             }
-            // Cabeza: esfera naranja con una varilla, y la referencia en blanco.
-            head = Entity.create(listOf(Transform(Pose(local(cx, cy, 0.03f), Quaternion())), TransformParent(root)))
-            headParts += sphere(head, Vector3(0f, 0f, 0f), 0.018f, HEAD)
+            // Cabeza en su posición real; la referencia (blanco) sobre la mesa.
+            head = Entity.create(listOf(Transform(Pose(local(cx, cy, HEAD_LIFT), Quaternion())), TransformParent(root)))
+            headParts += sphere(head, Vector3(0f, 0f, 0f), HEAD_R, HEAD)
             headParts += box(head, Vector3(-0.003f, 0f, -0.003f), Vector3(0.003f, 0.08f, 0.003f), HEAD)
+            // Garra: tres dedos alrededor de la cabeza (solo en modo grúa).
+            for (i in 0 until 3) {
+                val a = i * 2 * Math.PI.toFloat() / 3
+                val at = Vector3(cos(a) * 0.022f, -0.012f, sin(a) * 0.022f)
+                clawParts += box(head, at + Vector3(-0.003f, -0.02f, -0.003f), at + Vector3(0.003f, 0.012f, 0.003f), CLAW, Visible(false))
+            }
             target = sphere(root, local(cx, cy, 0.004f), 0.008f, WHITE)
+
+            buildSlingshot(h)
+            buildClawControls(h)
+
+            // Calibración: esquina izquierda (A, cian) y derecha (B, amarilla)
+            // del borde de tu lado.
+            markA = grabbable(toWorld(Vector3(-w / 2, 0f, h / 2)), MARK_R, MARK_A, IsdkGrabMovementType.Direct)
+            markB = grabbable(toWorld(Vector3(w / 2, 0f, h / 2)), MARK_R, MARK_B, IsdkGrabMovementType.Direct)
+            markA.setComponent(Visible(false))
+            markB.setComponent(Visible(false))
+
+            // Otro jugador: cabeza, visor y manos.
+            avatar += worldSphere(0.08f, WHITE)
+            avatar += worldSphere(0.035f, HOLE)
+            avatar += worldSphere(0.03f, WHITE)
+            avatar += worldSphere(0.03f, WHITE)
+            avatar += worldSphere(BALL_R, BALL)
 
             Entity.createPanelEntity(
                 R.id.game3d_status,
-                Transform(Pose(Vector3(0f, 0.17f, -h / 2 - 0.04f), Quaternion())),
+                Transform(Pose(Vector3(0f, 0.2f, -h / 2 - 0.04f), Quaternion())),
                 TransformParent(root),
             )
             Entity.createPanelEntity(
                 R.id.game3d_new,
-                Transform(Pose(Vector3(-0.08f, 0.09f, -h / 2 - 0.04f), Quaternion())),
+                Transform(Pose(Vector3(-0.08f, 0.12f, -h / 2 - 0.04f), Quaternion())),
                 TransformParent(root),
             )
             Entity.createPanelEntity(
                 R.id.game3d_back,
-                Transform(Pose(Vector3(0.08f, 0.09f, -h / 2 - 0.04f), Quaternion())),
+                Transform(Pose(Vector3(0.08f, 0.12f, -h / 2 - 0.04f), Quaternion())),
+                TransformParent(root),
+            )
+            Entity.createPanelEntity(
+                R.id.game3d_calib,
+                Transform(Pose(Vector3(0f, 0.07f, -h / 2 - 0.04f), Quaternion())),
                 TransformParent(root),
             )
             built = true
         }
 
+        /// Resortera al centro del borde de tu lado: poste, horquilla y pelota.
+        private fun buildSlingshot(h: Float) {
+            val z = h / 2 + SLING_DIST
+            slingRest = Vector3(0f, SLING_H, z)
+            forkL = Vector3(-0.045f, SLING_H + 0.02f, z)
+            forkR = Vector3(0.045f, SLING_H + 0.02f, z)
+            slingParts += box(root, Vector3(-0.006f, 0f, z - 0.006f), Vector3(0.006f, SLING_H - 0.03f, z + 0.006f), WOOD)
+            slingParts += box(root, Vector3(-0.05f, SLING_H - 0.036f, z - 0.006f), Vector3(0.05f, SLING_H - 0.024f, z + 0.006f), WOOD)
+            for (f in listOf(forkL, forkR)) {
+                slingParts += box(root, Vector3(f.x - 0.006f, SLING_H - 0.03f, z - 0.006f), Vector3(f.x + 0.006f, f.y, z + 0.006f), WOOD)
+            }
+            repeat(2 * BAND_DOTS) { bands += sphere(root, slingRest, 0.004f, BAND) }
+            repeat(TRAJ_DOTS) { dots += sphere(root, slingRest, 0.005f, WHITE, Visible(false)) }
+            ball = grabbable(toWorld(slingRest), BALL_R, BALL, IsdkGrabMovementType.Direct)
+            slingParts += bands
+            slingParts += ball
+        }
+
+        /// Joystick a la izquierda y botón a la derecha, como una máquina de peluches.
+        private fun buildClawControls(h: Float) {
+            val z = h / 2 + 0.09f
+            val joyBase = Vector3(-0.13f, 0f, z)
+            knobRest = joyBase + Vector3(0f, JOY_H, 0f)
+            clawParts += box(root, joyBase + Vector3(-0.04f, 0f, -0.04f), joyBase + Vector3(0.04f, 0.015f, 0.04f), CONSOLE)
+            repeat(STICK_DOTS) { stick += sphere(root, knobRest, 0.006f, GRID) }
+            knob = grabbable(toWorld(knobRest), 0.018f, BUTTON, IsdkGrabMovementType.Direct)
+            buttonAt = Vector3(0.13f, 0.025f, z)
+            clawParts += box(root, Vector3(0.09f, 0f, z - 0.04f), Vector3(0.17f, 0.015f, z + 0.04f), CONSOLE)
+            // El botón no se mueve al agarrarlo: agarrarlo (o tocarlo) es apretarlo.
+            button = grabbable(toWorld(buttonAt), 0.025f, BUTTON, IsdkGrabMovementType.None)
+            clawParts += stick
+            clawParts += knob
+            clawParts += button
+        }
+
         fun place(pose: Pose) {
             rootPose = pose
-            if (built) root.setComponent(Transform(pose))
+            if (built) {
+                root.setComponent(Transform(pose))
+                root.setComponent(Scale(Vector3(scale)))
+            }
             placed = true
         }
 
-        fun headWorld(): Vector3 = rootPose * local(num("posX"), num("posY"), 0.03f)
+        /// Empieza o termina la calibración. Al terminar, la mesa se acomoda
+        /// para que sus esquinas de tu lado queden en los marcadores.
+        fun toggleCalibration() {
+            if (!calibrating) {
+                setWorld(markA, Vector3(-boardW / 2, 0f, halfH))
+                setWorld(markB, Vector3(boardW / 2, 0f, halfH))
+                listOf(markA, markB).forEach {
+                    it.setComponent(Visible(true))
+                    setGrabbable(it, true)
+                }
+                calibrating = true
+                return
+            }
+            val a = markA.getComponent<Transform>().transform.t - Vector3(0f, MARK_R, 0f)
+            val b = markB.getComponent<Transform>().transform.t - Vector3(0f, MARK_R, 0f)
+            listOf(markA, markB).forEach {
+                it.setComponent(Visible(false))
+                setGrabbable(it, false)
+            }
+            calibrating = false
+            val d = Vector3(b.x - a.x, 0f, b.z - a.z)
+            if (d.length() < 0.05f) return // marcadores encimados: se ignora
+            val yaw = atan2(-d.z, d.x)
+            val q = Quaternion(cos(yaw / 2), 0f, sin(yaw / 2), 0f)
+            scale = d.length() / boardW
+            val mid = (a + b) * 0.5f
+            calibrated = true
+            place(Pose(mid + q * Vector3(0f, 0f, -halfH * scale), q))
+        }
 
-        fun update(hover: Boolean) {
-            if (geo == null) return
-            head.setComponent(Transform(Pose(local(num("posX"), num("posY"), 0.03f), Quaternion())))
+        /// Dibuja al otro jugador con su pose (PoseFrame), o lo oculta (null).
+        fun drawAvatar(f: ByteArray?, me: Int) {
+            val ok = f != null && f.size == POSE_LENGTH && (f[0].toInt() and 0xFF) == POSE_HEADER &&
+                (f[1].toInt() and 0xFF) != me
+            if (!ok) {
+                avatar.forEach { it.setComponent(Visible(false)) }
+                return
+            }
+            f!!
+            fun i16(at: Int) = ((f[at].toInt() and 0xFF) or (f[at + 1].toInt() shl 8)).toShort().toFloat()
+            fun point(at: Int) = toWorld(fromBoardMm(i16(at), i16(at + 2), i16(at + 4)))
+            val flags = f[29].toInt()
+            val id = f[1].toInt() and 0xFF
+            // Su color: el de su ficha (el espejo de la simulación es "el otro").
+            val other = if (id == 1 || id == 2) id else 3 - me
+            if (other != avatarColor) {
+                avatarColor = other
+                val c = if (other == 1) PIECE_X else PIECE_O
+                listOf(0, 2, 3).forEach { avatar[it].setComponent(material(c)) }
+            }
+            val head = point(2)
+            val fwd = rootPose.q * Vector3(f[8] / 127f, f[10] / 127f, -f[9] / 127f)
+            show(avatar[0], head, true)
+            show(avatar[1], head + fwd * 0.07f, true)
+            show(avatar[2], point(11), flags and 1 != 0)
+            show(avatar[3], point(17), flags and 2 != 0)
+            show(avatar[4], point(23), flags and 4 != 0 && !clawMode())
+        }
+
+        private fun show(e: Entity, world: Vector3, visible: Boolean) {
+            e.setComponent(Visible(visible))
+            if (visible) e.setComponent(Transform(Pose(world, Quaternion())))
+        }
+
+        private fun worldSphere(r: Float, color: Color4) = Entity.create(
+            listOf(
+                Mesh(Uri.parse("mesh://sphere")),
+                Sphere(r),
+                material(color),
+                Transform(Pose(Vector3(0f, -10f, 0f), Quaternion())),
+                Visible(false),
+            ),
+        )
+
+        fun grabbed(e: Entity) = e.getComponent<IsdkGrabbable>().grabState == IsdkGrabState.Grabbed
+
+        fun setGrabbable(e: Entity, on: Boolean) {
+            val g = e.getComponent<IsdkGrabbable>()
+            if (g.enabled != on) e.setComponent(g.apply { enabled = on })
+        }
+
+        fun setLocal(e: Entity, l: Vector3) = e.setComponent(Transform(Pose(l, Quaternion())))
+        fun setWorld(e: Entity, l: Vector3) = e.setComponent(Transform(Pose(toWorld(l), rootPose.q)))
+
+        /// Ligas de la resortera: de cada punta de la horquilla a la pelota.
+        fun drawBands(ballLocal: Vector3) {
+            for (i in 0 until BAND_DOTS) {
+                val t = (i + 1f) / (BAND_DOTS + 1)
+                setLocal(bands[i], forkL + (ballLocal - forkL) * t)
+                setLocal(bands[BAND_DOTS + i], forkR + (ballLocal - forkR) * t)
+            }
+        }
+
+        /// Puntos de la trayectoria prevista (null = ocultos).
+        fun drawTrajectory(p0: Vector3?, v: Vector3, tLand: Float) {
+            for ((i, d) in dots.withIndex()) {
+                if (p0 == null) {
+                    d.setComponent(Visible(false))
+                    continue
+                }
+                val t = tLand * (i + 1) / TRAJ_DOTS
+                setLocal(d, p0 + v * t + Vector3(0f, -GRAVITY * t * t / 2, 0f))
+                d.setComponent(Visible(true))
+            }
+        }
+
+        fun drawStick(knobLocal: Vector3) {
+            val base = Vector3(knobRest.x, 0.015f, knobRest.z)
+            for ((i, s) in stick.withIndex()) setLocal(s, base + (knobLocal - base) * ((i + 0.5f) / STICK_DOTS))
+        }
+
+        fun showHole(cell: Int, on: Boolean) {
+            if (cell in 0 until 9) holes[cell].setComponent(Visible(on))
+        }
+
+        fun update() {
+            val mine = canMove()
+            val claw = clawMode()
+            setLocal(head, local(num("posX"), num("posY"), headLift))
             target.setComponent(Transform(Pose(local(num("refX"), num("refY"), 0.004f), Quaternion())))
 
-            val mine = canMove()
             val bl = if (mine) 1 else 0
             if (bl != baseLook) {
                 baseLook = bl
                 base.setComponent(material(if (mine) BASE_MINE else BASE_LOCKED))
             }
-            val hl = if (dragging) 2 else if (hover && mine) 1 else 0
-            if (hl != headLook) {
-                headLook = hl
-                val c = if (hl == 2) HEAD_GRAB else if (hl == 1) HEAD_HOVER else HEAD
-                headParts.forEach { it.setComponent(material(c)) }
+            val ml = if (claw) 1 else 0
+            if (ml != modeLook) {
+                modeLook = ml
+                slingParts.forEach { it.setComponent(Visible(!claw)) }
+                clawParts.forEach { it.setComponent(Visible(claw)) }
+                headLift = if (claw) CLAW_UP else HEAD_LIFT
+                if (claw) drawTrajectory(null, Vector3(0f), 0f)
             }
 
             val board = game["board"] as? List<*>
@@ -333,8 +582,8 @@ class GameActivity3D : AppSystemActivity() {
                 val p = (board?.getOrNull(c) as? Number)?.toInt() ?: 0
                 if (p != pieceLook[c]) {
                     pieceLook[c] = p
-                    crosses[c].forEach { it.setComponent(Visible(p == 1)) }
-                    rings[c].forEach { it.setComponent(Visible(p == 2)) }
+                    pieces[c].first.setComponent(Visible(p == 1))
+                    pieces[c].second.setComponent(Visible(p == 2))
                 }
                 // Baldosa: IR ahora > último tiro > nada.
                 val look = when {
@@ -350,6 +599,34 @@ class GameActivity3D : AppSystemActivity() {
                 }
             }
         }
+
+        private fun piece(name: String, at: Vector3, size: Float) = Entity.create(
+            listOf(
+                Mesh(Uri.parse("apk:///models/$name.glb")),
+                Transform(Pose(at + Vector3(0f, 0.004f, 0f), Quaternion())),
+                Scale(Vector3(size)),
+                TransformParent(root),
+                Visible(false),
+            ),
+        )
+
+        /// Esfera que se agarra con la mano (palma o pellizco).
+        private fun grabbable(world: Vector3, r: Float, color: Color4, movement: IsdkGrabMovementType) = Entity.create(
+            listOf(
+                Mesh(Uri.parse("mesh://sphere")),
+                Sphere(r),
+                material(color),
+                Transform(Pose(world, rootPose.q)),
+                IsdkSphereCollider(r + 0.015f),
+                IsdkGrabbable(enabled = false, movementType = movement),
+                IsdkGrabFilter(
+                    handContactPinch = true,
+                    handDistancePinch = false,
+                    handContactPalm = true,
+                    handDistancePalm = false,
+                ),
+            ),
+        )
 
         private fun box(parent: Entity, min: Vector3, max: Vector3, color: Color4, vararg more: ComponentBase): Entity =
             Entity.create(
@@ -376,80 +653,325 @@ class GameActivity3D : AppSystemActivity() {
 
     // --- Interacción ------------------------------------------------------------
 
+    /// Qué pasa con el tiro en curso.
+    private enum class Shot { IDLE, AIMING, FLYING, WAITING, SINKING, BOUNCING }
+
     /// Cada cuadro: coloca la mesa frente al usuario, arma el tablero cuando
-    /// llega la geometría, sigue el arrastre de la cabeza y actualiza todo.
+    /// llega la geometría, atiende la resortera o la grúa y actualiza todo.
     private inner class GameSystem : SystemBase() {
-        private var hand: Entity? = null
         private var lastSentAt = 0L
+        private var lastFrame = 0L
         private var statusText = ""
 
-        override fun execute() {
-            val body = Query.where { has(AvatarBody.id) }.eval()
-                .filter { it.isLocal() && it.getComponent<AvatarBody>().isPlayerControlled }
-                .firstOrNull()?.getComponent<AvatarBody>() ?: return
+        // Tiro (los dos modos): se manda "fire" y se espera a que la ESP pase
+        // por RESOLVIENDO (fase 2) y salga con el resultado.
+        private var shot = Shot.IDLE
+        private var firedAt = 0L
+        private var sawResolving = false
+        private var animStart = 0L
+        private var resultCell = -1
 
+        // Resortera: pelota en coordenadas de la mesa.
+        private var ballPos = Vector3(0f)
+        private var ballVel = Vector3(0f)
+
+        // Grúa: hacia dónde va la cabeza, en mm.
+        private var clawX = Float.NaN
+        private var clawY = Float.NaN
+        private var buttonDown = false
+        private var remoteClawDown = false
+        private var lastPoseAt = 0L
+
+        override fun execute() {
             // Antes de rastrear el visor reporta la cabeza en el piso: se espera.
             val viewer = scene.getViewerPose()
             if (viewer.t.y < MIN_HEAD_HEIGHT) return
-            if (!scene3d.placed || viewer.t.distanceTo(scene3d.rootPose.t) > 2f) placeInFront(viewer)
+            // Calibrada, la mesa se queda donde la pusiste.
+            if (!scene3d.calibrated && (!scene3d.placed || viewer.t.distanceTo(scene3d.rootPose.t) > 2f)) {
+                placeInFront(viewer)
+            }
 
             val g = geometry()
             if (g != null && !scene3d.built) scene3d.build(g)
             updateStatus()
-            if (!scene3d.built) return
+            if (!scene3d.built || g == null) return
 
-            val headPos = scene3d.headWorld()
-            val hands = listOf(body.rightHand to PINCH_R, body.leftHand to PINCH_L)
-            var hover = false
+            val now = System.nanoTime()
+            val dt = if (lastFrame == 0L) 0f else min((now - lastFrame) / 1e9f, 0.05f)
+            lastFrame = now
 
-            if (hand == null) {
-                for ((h, bits) in hands) {
-                    val c = h.tryGetComponent<Controller>() ?: continue
-                    if (!c.isActive || c.type != ControllerType.HAND) continue
-                    val pose = h.tryGetComponent<Transform>()?.transform ?: continue
-                    val near = pose.t.distanceTo(headPos) < GRAB_RADIUS
-                    hover = hover || near
-                    if (near && canMove() && (c.buttonState and c.changedButtons and bits) != 0) {
-                        hand = h
-                        scene3d.dragging = true
-                        break
-                    }
-                }
-            } else {
-                val h = hand!!
-                val c = h.tryGetComponent<Controller>()
-                val pose = h.tryGetComponent<Transform>()?.transform
-                val bits = if (h == body.rightHand) PINCH_R else PINCH_L
-                if (c == null || pose == null || !c.isActive || (c.buttonState and bits) == 0 || !canMove()) {
-                    hand = null
-                    scene3d.dragging = false
-                } else {
-                    drag(pose.t, g)
-                }
+            if (calibToggle) {
+                calibToggle = false
+                scene3d.toggleCalibration()
+                val label = if (scene3d.calibrating) "Listo" else "Calibrar"
+                calibButton?.let { b -> b.post { b.text = label } }
             }
-            scene3d.update(hover)
+            sendPose(viewer, now)
+            val remote = remotePose.takeIf { now - remoteAt < REMOTE_STALE_NS }
+            scene3d.drawAvatar(remote, int("me"))
+            remoteClawDown = remote != null && remote.size == POSE_LENGTH && remote[29].toInt() and 8 != 0
+
+            trackResult(now)
+            // Lo del otro modo está oculto: que tampoco se pueda agarrar.
+            if (clawMode()) {
+                scene3d.setGrabbable(scene3d.ball, false)
+                claw(g, dt, now)
+            } else {
+                scene3d.setGrabbable(scene3d.knob, false)
+                scene3d.setGrabbable(scene3d.button, false)
+                slingshot(g, dt, now)
+            }
+            scene3d.update()
         }
 
-        private fun drag(handPos: Vector3, g: Geometry?) {
-            if (g == null) return
-            val now = System.currentTimeMillis()
-            if (now - lastSentAt < SEND_EVERY_MS) return
+        // --- Resultado del tiro ------------------------------------------------------
+
+        private fun fire(now: Long) {
+            PanelBus.send(this@GameActivity3D, "fire")
+            firedAt = now
+            sawResolving = false
+        }
+
+        /// Tras tirar: espera la fase 2 y luego el resultado. Si la ESP no
+        /// aceptó el tiro (no llegó a fase 2) o tarda demasiado, se cancela.
+        private fun trackResult(now: Long) {
+            if (shot != Shot.FLYING && shot != Shot.WAITING) return
+            val phase = int("phase")
+            val ms = (now - firedAt) / 1_000_000
+            if (phase == 2) sawResolving = true
+            when {
+                sawResolving && phase != 2 -> if (shot == Shot.WAITING) finishShot(now)
+                !sawResolving && ms > FIRE_ACCEPT_MS -> reset()
+                ms > FIRE_TIMEOUT_MS -> reset()
+            }
+        }
+
+        private fun finishShot(now: Long) {
+            val placed = int("lastResult") == 1
+            resultCell = int("lastCell", -1)
+            animStart = now
+            if (clawMode()) {
+                shot = Shot.SINKING // la garra sube de regreso
+                return
+            }
+            if (placed && resultCell >= 0) {
+                scene3d.showHole(resultCell, true)
+                shot = Shot.SINKING
+            } else {
+                // Rebota: sale hacia arriba y a un lado.
+                val side = if (ballPos.x >= 0) 1f else -1f
+                ballVel = Vector3(side * 0.5f, 1.1f, -0.25f)
+                shot = Shot.BOUNCING
+            }
+        }
+
+        private fun reset() {
+            if (resultCell >= 0) scene3d.showHole(resultCell, false)
+            resultCell = -1
+            shot = Shot.IDLE
+            scene3d.headLift = if (clawMode()) CLAW_UP else HEAD_LIFT
+        }
+
+        // --- Resortera ------------------------------------------------------------
+
+        private fun slingshot(g: Geometry, dt: Float, now: Long) {
+            val s = scene3d
+            val mine = canMove()
+            s.setGrabbable(s.ball, mine && (shot == Shot.IDLE || shot == Shot.AIMING))
+            when (shot) {
+                Shot.IDLE -> {
+                    if (mine && s.grabbed(s.ball)) {
+                        shot = Shot.AIMING
+                    } else {
+                        s.setWorld(s.ball, s.slingRest)
+                        s.drawBands(s.slingRest)
+                        s.drawTrajectory(null, Vector3(0f), 0f)
+                    }
+                }
+                Shot.AIMING -> {
+                    val (p0, v) = launch(s.toLocal(s.ball.getComponent<Transform>().transform.t))
+                    val pulled = (s.slingRest - p0).length() > MIN_PULL
+                    if (s.grabbed(s.ball) && mine) {
+                        s.drawBands(p0)
+                        val tLand = landingTime(p0, v)
+                        s.drawTrajectory(if (pulled) p0 else null, v, tLand)
+                        if (pulled) sendMove(g, p0 + v * tLand, now)
+                    } else if (pulled && mine) {
+                        // Soltó: la cabeza ya va al punto de caída; vuela y se tira.
+                        sendMove(g, p0 + v * landingTime(p0, v), now, force = true)
+                        fire(now)
+                        ballPos = p0
+                        ballVel = v
+                        s.drawTrajectory(null, v, 0f)
+                        shot = Shot.FLYING
+                    } else {
+                        shot = Shot.IDLE
+                    }
+                }
+                Shot.FLYING, Shot.BOUNCING -> {
+                    ballPos += ballVel * dt
+                    ballVel += Vector3(0f, -GRAVITY * dt, 0f)
+                    if (shot == Shot.FLYING) {
+                        s.drawBands(s.slingRest)
+                        if (ballPos.y <= BALL_R) {
+                            ballPos = Vector3(ballPos.x, BALL_R, ballPos.z)
+                            shot = Shot.WAITING
+                        }
+                    } else if (now - animStart > BOUNCE_NS) {
+                        reset()
+                    }
+                    s.setWorld(s.ball, ballPos)
+                }
+                Shot.WAITING -> s.setWorld(s.ball, ballPos)
+                Shot.SINKING -> {
+                    // Rueda al centro del hueco y se hunde.
+                    val t = (now - animStart) / 1e9f
+                    val hole = s.local(g.cellX(resultCell), g.cellY(resultCell), BALL_R)
+                    val p = if (t < 0.3f) ballPos + (hole - ballPos) * (t / 0.3f) else hole - Vector3(0f, (t - 0.3f) * 0.12f, 0f)
+                    s.setWorld(s.ball, p)
+                    if (t > 1.2f) reset()
+                }
+            }
+        }
+
+        /// Pelota jalada hasta [ball] (local) -> punto de salida y velocidad.
+        private fun launch(ball: Vector3): Pair<Vector3, Vector3> {
+            val rest = scene3d.slingRest
+            var pull = rest - ball
+            if (pull.length() > MAX_PULL) pull = pull.normalize() * MAX_PULL
+            return (rest - pull) to (pull * LAUNCH_K)
+        }
+
+        /// Cuándo toca la mesa (y = radio) un tiro desde [p0] con [v].
+        private fun landingTime(p0: Vector3, v: Vector3): Float {
+            val h = p0.y - BALL_R
+            return (v.y + sqrt(v.y * v.y + 2 * GRAVITY * maxOf(h, 0f))) / GRAVITY
+        }
+
+        // --- Grúa -------------------------------------------------------------------
+
+        private fun claw(g: Geometry, dt: Float, now: Long) {
+            val s = scene3d
+            val mine = canMove()
+            val idle = shot == Shot.IDLE
+            s.setGrabbable(s.knob, mine && idle)
+            s.setGrabbable(s.button, mine && idle)
+            if (!mine || clawX.isNaN()) {
+                clawX = num("refX")
+                clawY = num("refY")
+            }
+
+            // Joystick: la inclinación de la perilla da la velocidad de la cabeza.
+            val knobLocal = s.toLocal(s.knob.getComponent<Transform>().transform.t)
+            if (mine && idle && s.grabbed(s.knob)) {
+                var off = Vector3(knobLocal.x - s.knobRest.x, 0f, knobLocal.z - s.knobRest.z)
+                if (off.length() > JOY_R) off = off.normalize() * JOY_R
+                clawX = (clawX + off.x / JOY_R * JOY_SPEED * dt).coerceIn(g.xMin, g.xMax)
+                clawY = (clawY - off.z / JOY_R * JOY_SPEED * dt).coerceIn(g.yMin, g.yMax)
+                sendMoveMm(clawX, clawY, now)
+                s.drawStick(s.knobRest + off)
+            } else {
+                s.setWorld(s.knob, s.knobRest)
+                s.drawStick(s.knobRest)
+            }
+
+            // Botón: agarrarlo o meter la mano en él lo aprieta.
+            val pressed = s.grabbed(s.button) || handNear(s.toWorld(s.buttonAt), BUTTON_REACH)
+            s.setWorld(s.button, s.buttonAt - Vector3(0f, if (pressed) 0.01f else 0f, 0f))
+            if (pressed && !buttonDown && mine && idle) {
+                sendMoveMm(clawX, clawY, now, force = true)
+                fire(now)
+                animStart = now
+                shot = Shot.FLYING
+            }
+            buttonDown = pressed
+
+            // Garra: baja al tirar, espera abajo el resultado y sube.
+            val t = (now - animStart) / 1e9f
+            s.headLift = when (shot) {
+                Shot.FLYING, Shot.WAITING -> {
+                    if (t >= CLAW_DROP_S) shot = Shot.WAITING
+                    CLAW_UP + (CLAW_DOWN - CLAW_UP) * min(t / CLAW_DROP_S, 1f)
+                }
+                Shot.SINKING -> {
+                    if (t >= CLAW_DROP_S) reset()
+                    CLAW_DOWN + (CLAW_UP - CLAW_DOWN) * min(t / CLAW_DROP_S, 1f)
+                }
+                // El otro jugador soltó su garra: también se ve bajar aquí.
+                else -> if (remoteClawDown) CLAW_DOWN else CLAW_UP
+            }
+        }
+
+        /// Posición de cada mano rastreada (izquierda, derecha; null si no se ve).
+        private fun hands(): List<Vector3?> {
+            val body = Query.where { has(AvatarBody.id) }.eval()
+                .filter { it.isLocal() && it.getComponent<AvatarBody>().isPlayerControlled }
+                .firstOrNull()?.getComponent<AvatarBody>() ?: return listOf(null, null)
+            return listOf(body.leftHand, body.rightHand).map { h ->
+                val c = h.tryGetComponent<Controller>()
+                val p = h.tryGetComponent<Transform>()?.transform
+                if (c != null && p != null && c.isActive && c.type == ControllerType.HAND) p.t else null
+            }
+        }
+
+        /// ¿Alguna mano rastreada a menos de [r] m de [world]?
+        private fun handNear(world: Vector3, r: Float) = hands().any { it != null && it.distanceTo(world) < r }
+
+        /// Manda tu cabeza, manos y pelota al otro visor (PoseFrame, 15 Hz).
+        private fun sendPose(viewer: Pose, now: Long) {
+            if (now - lastPoseAt < POSE_EVERY_NS || game["connected"] != true) return
+            lastPoseAt = now
+            val s = scene3d
+            val f = ByteArray(POSE_LENGTH)
+            f[0] = POSE_HEADER.toByte()
+            f[1] = int("me").toByte()
+            fun put(at: Int, world: Vector3) {
+                val (x, y, h) = s.toBoardMm(s.toLocal(world))
+                for ((i, v) in listOf(x, y, h).withIndex()) {
+                    val n = v.toInt().coerceIn(-32768, 32767)
+                    f[at + 2 * i] = n.toByte()
+                    f[at + 2 * i + 1] = (n shr 8).toByte()
+                }
+            }
+            put(2, viewer.t)
+            val d = s.rootPose.q.inverse() * viewer.forward()
+            f[8] = (d.x * 127).toInt().toByte()
+            f[9] = (-d.z * 127).toInt().toByte()
+            f[10] = (d.y * 127).toInt().toByte()
+            var flags = 0
+            val (left, right) = hands()
+            left?.let { put(11, it); flags = flags or 1 }
+            right?.let { put(17, it); flags = flags or 2 }
+            if (!clawMode()) {
+                put(23, s.ball.getComponent<Transform>().transform.t)
+                flags = flags or 4
+            } else if (shot == Shot.FLYING || shot == Shot.WAITING) {
+                flags = flags or 8
+            }
+            f[29] = flags.toByte()
+            PanelBus.send(this@GameActivity3D, "pose", mapOf("data" to f))
+        }
+
+        // --- Envío ------------------------------------------------------------------
+
+        private fun sendMove(g: Geometry, landLocal: Vector3, now: Long, force: Boolean = false) {
+            val (x, y) = scene3d.toMm(landLocal)
+            sendMoveMm(x.coerceIn(g.xMin, g.xMax), y.coerceIn(g.yMin, g.yMax), now, force)
+        }
+
+        private fun sendMoveMm(x: Float, y: Float, now: Long, force: Boolean = false) {
+            if (!force && now - lastSentAt < SEND_EVERY_NS) return
             lastSentAt = now
-            val (x, y) = scene3d.toMm(handPos)
-            PanelBus.send(
-                this@GameActivity3D,
-                "move",
-                mapOf("x" to x.coerceIn(g.xMin, g.xMax).toDouble(), "y" to y.coerceIn(g.yMin, g.yMax).toDouble()),
-            )
+            PanelBus.send(this@GameActivity3D, "move", mapOf("x" to x.toDouble(), "y" to y.toDouble()))
         }
 
         private fun placeInFront(viewer: Pose) {
-            // A 45 cm al frente, a la altura de una mesa (45 cm bajo los ojos).
+            // A 50 cm al frente, a la altura de una mesa (45 cm bajo los ojos).
             val f = viewer.forward()
             var flat = Vector3(f.x, 0f, f.z)
             if (flat.length() < 1e-3f) flat = Vector3(0f, 0f, -1f)
             flat = flat.normalize()
-            val pos = viewer.t + flat * 0.5f + Vector3(0f, -0.45f, 0f)
+            val pos = viewer.t + flat * 0.55f + Vector3(0f, -0.45f, 0f)
             val toViewer = -flat
             val a = atan2(toViewer.x, toViewer.z)
             scene3d.place(Pose(pos, Quaternion(cos(a / 2), 0f, sin(a / 2), 0f)))
@@ -470,14 +992,44 @@ class GameActivity3D : AppSystemActivity() {
 
     private companion object {
         const val BOARD_M = 0.42f          // ancho del tablero virtual
-        const val GRAB_RADIUS = 0.08f      // m desde la cabeza
-        const val SEND_EVERY_MS = 50L      // 20 movimientos/s, como la UART
+        const val HEAD_R = 0.018f          // m, esfera de la cabeza
+        const val HEAD_LIFT = 0.03f        // m sobre la mesa (resortera)
+        const val SEND_EVERY_NS = 50_000_000L  // 20 movimientos/s, como la UART
         const val MIN_HEAD_HEIGHT = 0.3f
 
-        // Pellizco de índice: ButtonA (derecha) / ButtonX (izquierda); con la
-        // mano cerrada llega como squeeze.
-        val PINCH_R = ButtonBits.ButtonA or ButtonBits.ButtonSqueezeR
-        val PINCH_L = ButtonBits.ButtonX or ButtonBits.ButtonSqueezeL
+        // Resortera. La gravedad es menor a la real para que el vuelo se vea.
+        const val SLING_DIST = 0.1f        // m del borde de la mesa a la resortera
+        const val SLING_H = 0.12f          // m, altura de la pelota en reposo
+        const val BALL_R = 0.02f
+        const val MAX_PULL = 0.22f         // m que se puede jalar la liga
+        const val MIN_PULL = 0.03f         // menos que esto no cuenta como tiro
+        const val LAUNCH_K = 5.5f          // (m/s) por m jalado
+        const val GRAVITY = 3.0f           // m/s²
+        const val BAND_DOTS = 5
+        const val TRAJ_DOTS = 14
+        const val BOUNCE_NS = 1_500_000_000L
+
+        // Grúa.
+        const val JOY_H = 0.07f            // m, perilla sobre la base
+        const val JOY_R = 0.05f            // m de inclinación para velocidad máxima
+        const val JOY_SPEED = 60f          // mm/s a fondo
+        const val STICK_DOTS = 6
+        const val BUTTON_REACH = 0.045f    // m de la mano al botón para apretarlo
+        const val CLAW_UP = 0.12f
+        const val CLAW_DOWN = 0.03f
+        const val CLAW_DROP_S = 0.8f
+
+        // Calibración y el otro jugador.
+        const val MARK_R = 0.015f
+        const val POSE_HEADER = 0xD0
+        const val POSE_LENGTH = 30
+        const val POSE_EVERY_NS = 66_000_000L     // 15 Hz
+        const val REMOTE_STALE_NS = 1_000_000_000L // sin poses 1 s: se oculta
+
+        // Tras tirar: la ESP debe pasar a RESOLVIENDO pronto y resolver en
+        // su resolverMax (12 s) más el reposo.
+        const val FIRE_ACCEPT_MS = 2000L
+        const val FIRE_TIMEOUT_MS = 16000L
 
         val BASE_LOCKED = Color4(0.20f, 0.17f, 0.19f, 1f)
         val BASE_MINE = Color4(0.42f, 0.10f, 0.24f, 1f)      // tu turno: rosa oscuro
@@ -485,17 +1037,18 @@ class GameActivity3D : AppSystemActivity() {
         val IR = Color4(0.20f, 0.75f, 0.85f, 1f)
         val PLACED = Color4(0.30f, 0.75f, 0.40f, 1f)
         val MISSED = Color4(0.85f, 0.25f, 0.25f, 1f)
+        val HOLE = Color4(0.02f, 0.02f, 0.02f, 1f)
+        val HEAD = Color4(1.0f, 0.62f, 0.18f, 1f)
+        val CLAW = Color4(0.75f, 0.75f, 0.80f, 1f)
+        val WOOD = Color4(0.55f, 0.36f, 0.20f, 1f)
+        val BAND = Color4(0.85f, 0.15f, 0.15f, 1f)
+        val BALL = Color4(0.95f, 0.20f, 0.20f, 1f)
+        val CONSOLE = Color4(0.15f, 0.15f, 0.18f, 1f)
+        val BUTTON = Color4(0.95f, 0.10f, 0.20f, 1f)
+        val WHITE = Color4(1f, 1f, 1f, 1f)
         val PIECE_X = Color4(0.74f, 0.0f, 0.29f, 1f)        // rosa del tema
         val PIECE_O = Color4(0.95f, 0.85f, 0.90f, 1f)
-        val HEAD = Color4(1.0f, 0.62f, 0.18f, 1f)
-        val HEAD_HOVER = Color4(1.0f, 0.78f, 0.45f, 1f)
-        val HEAD_GRAB = Color4(1.0f, 0.92f, 0.70f, 1f)
-        val WHITE = Color4(1f, 1f, 1f, 1f)
-
-        /// Rotación de [deg] grados alrededor del eje Y.
-        fun yaw(deg: Float): Quaternion {
-            val h = Math.toRadians(deg.toDouble()).toFloat() / 2
-            return Quaternion(cos(h), 0f, sin(h), 0f)
-        }
+        val MARK_A = Color4(0.10f, 0.85f, 0.95f, 1f)
+        val MARK_B = Color4(1.0f, 0.85f, 0.10f, 1f)
     }
 }

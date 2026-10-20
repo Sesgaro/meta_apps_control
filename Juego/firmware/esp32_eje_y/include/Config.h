@@ -6,7 +6,8 @@
 // matriz de sensores IR. Recibe la referencia de la ESP32-S3 (que hace BLE y
 // lleva el juego) por UART en vez de Wi-Fi/MQTT.
 //
-// El eje Y es un husillo (el eje Z de una BIQU B1: T8, 8 mm por vuelta). El
+// El eje Y es un piñón-cremallera (la banda GT2 con polea de 20 dientes del X
+// de una BIQU B1: 40 mm por vuelta). El
 // PID sigue trabajando en grados del motor, como en el proyecto original (sus
 // ganancias valen igual); solo la frontera cambia: la referencia llega en mm
 // y se convierte a grados, y la posición se reporta en mm.
@@ -64,9 +65,9 @@ constexpr float REDUCCION = 34.0f;
 constexpr float CPR = PPR * REDUCCION * 4.0f;  // 1496 pulsos por vuelta
 
 // --- Eje lineal -------------------------------------------------------------
-// Avance del carro por vuelta del eje de salida del motor (paso × entradas
-// del husillo). Si hay otra reducción entre el motor y el husillo, inclúyela.
-constexpr float MM_POR_VUELTA = 8.0f;
+// Avance del carro por vuelta del eje de salida del motor (circunferencia del
+// piñón / polea). Si hay otra reducción entre el motor y el piñón, inclúyela.
+constexpr float MM_POR_VUELTA = 40.0f;
 // La posición al encender es 0 mm (el encoder es incremental): enciende con
 // el carro en el extremo mínimo. Fuera de este rango no se acepta referencia.
 constexpr float MIN_POSITION_MM = 0.0f;

@@ -9,7 +9,10 @@ import 'package:flutter/services.dart';
 ///
 ///   3D -> 2D      [hello]     acaba de abrirse, pide el estado
 ///   3D -> 2D      [move]      {x, y} en mm, mover la cabeza
+///   3D -> 2D      [fire]      tirar: lanzar la pelota / soltar la garra
 ///   3D -> 2D      [newGame]   partida nueva
+///   3D -> 2D      [pose]      {data} tu pose (PoseFrame) para el otro visor
+///   2D -> 3D      [poses]     {data} pose del otro visor
 ///   2D -> 3D      [game]      estado del juego, ver GameState.toMap()
 ///   2D -> nativo  [openGame3d] / [closeGame3d] abre o cierra el tablero 3D
 class PanelBus {
@@ -19,7 +22,10 @@ class PanelBus {
 
   static const hello = 'hello';
   static const move = 'move';
+  static const fire = 'fire';
   static const newGame = 'newGame';
+  static const pose = 'pose';
+  static const poses = 'poses';
   static const game = 'game';
   static const openGame3d = 'openGame3d';
   static const closeGame3d = 'closeGame3d';

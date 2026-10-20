@@ -79,4 +79,6 @@ dependencies {
     "questImplementation"("com.meta.spatial:meta-spatial-sdk:$metaSpatialSdkVersion")
     "questImplementation"("com.meta.spatial:meta-spatial-sdk-toolkit:$metaSpatialSdkVersion")
     "questImplementation"("com.meta.spatial:meta-spatial-sdk-vr:$metaSpatialSdkVersion")
+    // Interaction SDK: manos virtuales y agarre con la palma de la cabeza.
+    "questImplementation"("com.meta.spatial:meta-spatial-sdk-isdk:$metaSpatialSdkVersion")
 }

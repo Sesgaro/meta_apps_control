@@ -8,7 +8,8 @@ está en `README.origen.md`). Cambios:
   `actualizarTelemetria()`. Sin órdenes 0.5 s, el motor se apaga.
 - `SensoresIr`: lee los 9 sensores de la matriz y manda la máscara a la S3.
 - Eje lineal: la referencia llega en mm y se convierte a grados del motor con
-  `MM_POR_VUELTA` (husillo T8, 8 mm); el PID sigue igual, en grados.
+  `MM_POR_VUELTA` (piñón-cremallera / GT2 20 dientes, 40 mm); el PID sigue
+  igual, en grados.
 
 Pines, UART y sensores en `include/Config.h`. Compilar y subir:
 

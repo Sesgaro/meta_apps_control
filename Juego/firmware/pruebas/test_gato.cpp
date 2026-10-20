@@ -99,6 +99,20 @@ int main() {
     CHECK(j.tablero[0] == JUGADOR_X && j.fase == TURNO);
   }
 
+  // Tirar: solo el jugador en turno, y pasa directo a RESOLVIENDO.
+  {
+    Juego j;
+    j.nueva(0);
+    CHECK(!j.tirar(JUGADOR_O, 10));
+    CHECK(j.fase == TURNO);
+    CHECK(j.tirar(JUGADOR_X, 10));
+    CHECK(j.fase == RESOLVIENDO);
+    CHECK(!j.puedeMover(JUGADOR_X));
+    j.actualizar(11, true, 4);
+    j.actualizar(11 + j.cfg.quietoMs, true, 4);
+    CHECK(j.tablero[4] == JUGADOR_X && j.turno == JUGADOR_O && j.fase == TURNO);
+  }
+
   // Partida completa: X gana en la diagonal; la siguiente empieza O.
   {
     Juego j;

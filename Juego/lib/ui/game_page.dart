@@ -9,9 +9,10 @@ import '../theme/expressive_theme.dart';
 import 'widgets/board_view.dart';
 import 'widgets/device_sheet.dart';
 
-/// Pantalla del gato: conexión, elección de ficha, estado del juego y
-/// tablero 2D. En el Quest además alimenta el tablero 3D (GameActivity3D)
-/// por [PanelBus]: le manda el estado y recibe los movimientos de la cabeza.
+/// Pantalla del gato. En el Quest: conexión, elección de ficha y estado; se
+/// juega solo en el tablero 3D (GameActivity3D), al que alimenta por
+/// [PanelBus]: le manda el estado y recibe los movimientos de la cabeza.
+/// En el teléfono es solo espectador: ve el tablero 2D pero no interviene.
 class GamePage extends StatefulWidget {
   const GamePage({super.key});
 
@@ -19,11 +20,25 @@ class GamePage extends StatefulWidget {
   State<GamePage> createState() => _GamePageState();
 }
 
+/// Cómo se juega en el tablero 3D. El índice viaja al 3D en `mode`.
+enum PlayMode {
+  /// Resortera: lanzas una pelota; la cabeza va a donde caería.
+  slingshot('Resortera', 'Jala la pelota de la resortera y suéltala.'),
+
+  /// Máquina de peluches: joystick mueve la cabeza y el botón suelta la garra.
+  claw('Grúa', 'Mueve la cabeza con el joystick y aprieta el botón.');
+
+  const PlayMode(this.label, this.hint);
+  final String label;
+  final String hint;
+}
+
 class _GamePageState extends State<GamePage> {
   final _link = GameLink();
 
   /// Con qué ficha juega este visor/teléfono.
   Player _me = Player.x;
+  PlayMode _mode = PlayMode.slingshot;
 
   @override
   void initState() {
@@ -31,7 +46,17 @@ class _GamePageState extends State<GamePage> {
     if (isQuest) {
       PanelBus.listen(_onPanelMessage);
       _link.addListener(_publishState);
+      _link.addListener(_open3dOnConnect);
+      _link.onPose = (f) => PanelBus.send(PanelBus.poses, {'data': f});
     }
+  }
+
+  bool _wasConnected = false;
+
+  /// En el Quest se juega en 3D: al conectar (o simular) se abre solo.
+  void _open3dOnConnect() {
+    if (_link.isConnected && !_wasConnected) PanelBus.send(PanelBus.openGame3d);
+    _wasConnected = _link.isConnected;
   }
 
   @override
@@ -42,14 +67,22 @@ class _GamePageState extends State<GamePage> {
 
   bool get _canMove {
     final s = _link.state;
-    return _link.isConnected &&
+    return isQuest &&
+        _link.isConnected &&
         s != null &&
         s.phase == Phase.turn &&
-        s.turn == _me;
+        (s.turn == _me || _link.isDemo);
   }
 
+  // En la simulación un solo dispositivo juega con las dos fichas.
+  Player get _player => _link.isDemo ? _link.state!.turn : _me;
+
   void _move(double x, double y) {
-    if (_canMove) _link.move(_me, x, y);
+    if (_canMove) _link.move(_player, x, y);
+  }
+
+  void _fire() {
+    if (_canMove) _link.fire(_player);
   }
 
   Future<void> _pickDevice() async {
@@ -66,8 +99,12 @@ class _GamePageState extends State<GamePage> {
         _publishState();
       case PanelBus.move:
         _move((args['x'] as num).toDouble(), (args['y'] as num).toDouble());
+      case PanelBus.fire:
+        _fire();
       case PanelBus.newGame:
         _link.newGame();
+      case PanelBus.pose:
+        if (args['data'] case final Uint8List data) _link.sendPose(data);
     }
   }
 
@@ -76,14 +113,16 @@ class _GamePageState extends State<GamePage> {
     PanelBus.send(PanelBus.game, {
       ...?_link.state?.toMap(),
       'connected': _link.isConnected,
-      'me': _me.code,
+      // En la simulación el 3D deja mover al que tenga el turno.
+      'me': (_link.isDemo ? _link.state?.turn ?? _me : _me).code,
+      'mode': _mode.index,
       'status': _statusText(_link.state),
     });
   }
 
   // --- Textos ----------------------------------------------------------------
 
-  String _who(Player p) => p == _me ? '${p.symbol} (tú)' : p.symbol;
+  String _who(Player p) => isQuest && p == _me ? '${p.symbol} (tú)' : p.symbol;
 
   String _statusText(GameState? s) {
     if (!_link.isConnected || s == null) return 'Sin conexión';
@@ -127,30 +166,49 @@ class _GamePageState extends State<GamePage> {
                   _ConnectionCard(
                     link: _link,
                     onConnect: _pickDevice,
+                    onDemo: isQuest ? _link.startDemo : null,
                     onDisconnect: _link.disconnect,
                   ),
-                  const SizedBox(height: 16),
-                  _Section(
-                    title: 'Tu ficha',
-                    child: SegmentedButton<Player>(
-                      segments: const [
-                        ButtonSegment(
-                          value: Player.x,
-                          label: Text('Jugador X'),
-                        ),
-                        ButtonSegment(
-                          value: Player.o,
-                          label: Text('Jugador O'),
-                        ),
-                      ],
-                      selected: {_me},
-                      showSelectedIcon: false,
-                      onSelectionChanged: (s) {
-                        setState(() => _me = s.first);
-                        _publishState();
-                      },
+                  if (isQuest) ...[
+                    const SizedBox(height: 16),
+                    _Section(
+                      title: 'Tu ficha',
+                      child: SegmentedButton<Player>(
+                        segments: const [
+                          ButtonSegment(
+                            value: Player.x,
+                            label: Text('Jugador X'),
+                          ),
+                          ButtonSegment(
+                            value: Player.o,
+                            label: Text('Jugador O'),
+                          ),
+                        ],
+                        selected: {_me},
+                        showSelectedIcon: false,
+                        onSelectionChanged: (s) {
+                          setState(() => _me = s.first);
+                          _publishState();
+                        },
+                      ),
                     ),
-                  ),
+                    const SizedBox(height: 16),
+                    _Section(
+                      title: 'Modo de juego',
+                      child: SegmentedButton<PlayMode>(
+                        segments: [
+                          for (final m in PlayMode.values)
+                            ButtonSegment(value: m, label: Text(m.label)),
+                        ],
+                        selected: {_mode},
+                        showSelectedIcon: false,
+                        onSelectionChanged: (s) {
+                          setState(() => _mode = s.first);
+                          _publishState();
+                        },
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   ..._game(context),
                 ],
@@ -198,36 +256,46 @@ class _GamePageState extends State<GamePage> {
                 style: text.bodyMedium?.copyWith(color: scheme.error),
               ),
             ],
-            const SizedBox(height: 16),
-            BoardView(state: s, onMove: _canMove ? _move : null),
-            const SizedBox(height: 8),
-            Text(
-              _canMove
-                  ? 'Arrastra sobre el tablero para mover la cabeza.'
-                  : 'Los motores están bloqueados para ti.',
-              style: text.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
-            ),
-            const SizedBox(height: 16),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                FilledButton.icon(
-                  onPressed: () {
-                    HapticFeedback.mediumImpact();
-                    _link.newGame();
-                  },
-                  icon: const Icon(Icons.restart_alt_rounded),
-                  label: const Text('Nuevo juego'),
+            if (!isQuest) ...[
+              const SizedBox(height: 16),
+              BoardView(state: s),
+              const SizedBox(height: 8),
+              Text(
+                'Solo espectador: se juega desde los Quest.',
+                style: text.bodyMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
                 ),
-                if (isQuest)
+              ),
+            ],
+            if (isQuest) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Juega en el tablero 3D. ${_mode.hint}',
+                style: text.bodyMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.icon(
+                    onPressed: () {
+                      HapticFeedback.mediumImpact();
+                      _link.newGame();
+                    },
+                    icon: const Icon(Icons.restart_alt_rounded),
+                    label: const Text('Nuevo juego'),
+                  ),
                   FilledButton.tonalIcon(
                     onPressed: () => PanelBus.send(PanelBus.openGame3d),
                     icon: const Icon(Icons.view_in_ar_rounded),
                     label: const Text('Abrir tablero 3D'),
                   ),
-              ],
-            ),
+                ],
+              ),
+            ],
           ],
         ),
       ),
@@ -261,11 +329,13 @@ class _ConnectionCard extends StatelessWidget {
   const _ConnectionCard({
     required this.link,
     required this.onConnect,
+    this.onDemo,
     required this.onDisconnect,
   });
 
   final GameLink link;
   final VoidCallback onConnect;
+  final VoidCallback? onDemo;
   final VoidCallback onDisconnect;
 
   @override
@@ -294,7 +364,10 @@ class _ConnectionCard extends StatelessWidget {
       ),
     };
     final subtitle = switch (link.status) {
-      LinkStatus.connected => 'Conectado a la máquina',
+      LinkStatus.connected =>
+        link.isDemo
+            ? 'Sin ESP: juegas con las dos fichas'
+            : 'Conectado a la máquina',
       LinkStatus.connecting => link.deviceName,
       LinkStatus.disconnected =>
         link.error ?? 'Busca ${GameProtocol.deviceName} para empezar',
@@ -342,9 +415,21 @@ class _ConnectionCard extends StatelessWidget {
               child: const Text('Salir'),
             ),
             LinkStatus.connecting => const SizedBox.shrink(),
-            LinkStatus.disconnected => FilledButton(
-              onPressed: onConnect,
-              child: const Text('Conectar'),
+            LinkStatus.disconnected => Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FilledButton(
+                  onPressed: onConnect,
+                  child: const Text('Conectar'),
+                ),
+                if (onDemo != null) ...[
+                  const SizedBox(height: 4),
+                  TextButton(
+                    onPressed: onDemo,
+                    child: const Text('Probar sin ESP'),
+                  ),
+                ],
+              ],
             ),
           },
         ],

@@ -111,6 +111,10 @@ object PanelBus {
             activity.startActivity(
                 Intent().setClassName(activity, name).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             )
+            // Horizon OS da las manos a una sola ventana: con el panel 2D al
+            // frente no se puede agarrar nada en el 3D. Se minimiza (sigue vivo
+            // con el BLE); "Volver a 2D" lo trae de regreso.
+            activity.moveTaskToBack(true)
             return
         }
         closers[method]?.let { name ->

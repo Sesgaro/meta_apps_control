@@ -38,16 +38,17 @@ pueden instalarse a la vez.
 ```
  Quest 1 ─┐ BLE                       UART
  Quest 2 ─┴──► ESP32-S3 ◄──────────────────► ESP32 normal
-               · árbitro del juego            · eje Y (husillo T8)
-               · eje X (banda / cremallera)   · matriz IR 3×3
+               · árbitro del juego            · eje Y (cremallera)
+               · eje X (husillo T8)           · matriz IR 3×3
 ```
 
-- Cada jugador, en su turno de 20 s, arrastra la cabeza de la máquina sobre un
-  tablero virtual (2D o 3D en el Quest); los motores X/Y la siguen.
+- Cada jugador, en su turno de 20 s, apunta en un tablero 3D del Quest con
+  una **resortera** (la cabeza va a donde caería la pelota) o una **grúa**
+  (joystick y botón); los motores X/Y mueven la cabeza. El teléfono solo mira.
 - Al acabarse el tiempo los motores se bloquean y la matriz IR dice sobre qué
   casilla quedó la cabeza: casilla libre = ficha; ninguna, varias u ocupada =
   turno perdido. Después controla el otro visor.
-- Los ejes se controlan en milímetros (40 mm por vuelta en X, 8 mm en Y); el
+- Los ejes se controlan en milímetros (8 mm por vuelta en X, 40 mm en Y); el
   PID sigue en grados del motor.
 - La ESP32 normal usa el firmware de
   [Analysis-of-Control-Systems](https://github.com/santi-bnt/Analysis-of-Control-Systems)

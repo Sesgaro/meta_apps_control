@@ -5,7 +5,8 @@
 //
 // Flujo de un turno:
 //   TURNO        el jugador en turno mueve la cabeza; corre el reloj.
-//   RESOLVIENDO  se acabó el tiempo: los motores quedan bloqueados (ya no se
+//   RESOLVIENDO  el jugador tiró (lanzó la pelota / soltó la garra) o se
+//                acabó el tiempo: los motores quedan bloqueados (ya no se
 //                aceptan movimientos), se espera a que la cabeza se detenga y
 //                se lee la matriz IR. Un solo sensor activo en una casilla
 //                libre = ficha puesta; ninguno, varios o casilla ocupada =
@@ -102,16 +103,18 @@ class Juego {
   /// Solo el jugador en turno mueve, y solo mientras corre su reloj.
   bool puedeMover(uint8_t jugador) const { return fase == TURNO && jugador == turno; }
 
+  /// El jugador en turno tira antes de que se acabe su reloj.
+  bool tirar(uint8_t jugador, uint32_t ahora) {
+    if (!puedeMover(jugador)) return false;
+    empezarResolver(ahora);
+    return true;
+  }
+
   /// Llamar en cada ciclo. [cabezaQuieta]: la cabeza llegó y no se mueve;
   /// [casillaIr]: casilla que ve la matriz IR ahora (o SIN_CASILLA/VARIAS).
   void actualizar(uint32_t ahora, bool cabezaQuieta, uint8_t casillaIr) {
     if (fase == TURNO) {
-      if (vencio(ahora, limite)) {
-        fase = RESOLVIENDO;
-        inicioResolver = ahora;
-        quietoDesde = 0;
-        hayQuieto = false;
-      }
+      if (vencio(ahora, limite)) empezarResolver(ahora);
       return;
     }
     if (fase != RESOLVIENDO) return;
@@ -143,6 +146,13 @@ class Juego {
 
   // Comparación que sobrevive al desbordamiento de millis() (~49 días).
   static bool vencio(uint32_t ahora, uint32_t t) { return (int32_t)(ahora - t) >= 0; }
+
+  void empezarResolver(uint32_t ahora) {
+    fase = RESOLVIENDO;
+    inicioResolver = ahora;
+    quietoDesde = 0;
+    hayQuieto = false;
+  }
 
   void iniciarTurno(uint32_t ahora) {
     fase = TURNO;
