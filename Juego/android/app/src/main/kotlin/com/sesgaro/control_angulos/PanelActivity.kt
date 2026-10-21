@@ -70,12 +70,28 @@ object PanelBus {
     fun attach(engine: FlutterEngine, activity: Activity): MethodChannel {
         val ch = MethodChannel(engine.dartExecutor.binaryMessenger, NAME)
         ch.setMethodCallHandler { call, result ->
-            dispatch(activity, call.method, call.arguments as? Map<*, *> ?: emptyMap<Any, Any>(), from = ch)
-            result.success(null)
+            val args = call.arguments as? Map<*, *> ?: emptyMap<Any, Any>()
+            when (call.method) {
+                // Preferencias del panel (ficha, modo): sobreviven a cerrar la app.
+                "loadPrefs" -> result.success(prefs(activity).all.filterValues { it is Int })
+                "savePrefs" -> {
+                    prefs(activity).edit().apply {
+                        args.forEach { (k, v) -> if (k is String && v is Int) putInt(k, v) }
+                    }.apply()
+                    result.success(null)
+                }
+                else -> {
+                    dispatch(activity, call.method, args, from = ch)
+                    result.success(null)
+                }
+            }
         }
         channels += ch
         return ch
     }
+
+    private fun prefs(activity: Activity) =
+        activity.getSharedPreferences("panel", Activity.MODE_PRIVATE)
 
     fun detach(ch: MethodChannel) {
         ch.setMethodCallHandler(null)

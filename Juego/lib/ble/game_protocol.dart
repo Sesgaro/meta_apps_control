@@ -234,5 +234,6 @@ class GameState {
     'xStep': geometry.xStep,
     'y0': geometry.y0,
     'yStep': geometry.yStep,
+    'turnSeconds': turnSeconds,
   };
 }

@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 ///   2D -> 3D      [poses]     {data} pose del otro visor
 ///   2D -> 3D      [game]      estado del juego, ver GameState.toMap()
 ///   2D -> nativo  [openGame3d] / [closeGame3d] abre o cierra el tablero 3D
+///   2D -> nativo  loadPrefs / savePrefs: ficha y modo guardados (enteros)
 class PanelBus {
   PanelBus._();
 
@@ -35,6 +36,12 @@ class PanelBus {
       onMessage(call.method, (call.arguments as Map?) ?? const {});
     });
   }
+
+  static Future<Map<String, Object?>> loadPrefs() async =>
+      await _channel.invokeMapMethod<String, Object?>('loadPrefs') ?? {};
+
+  static void savePrefs(Map<String, int> prefs) =>
+      _channel.invokeMethod<void>('savePrefs', prefs).ignore();
 
   static void send(String method, [Map<String, Object?>? args]) {
     // Si el otro panel está cerrado el mensaje simplemente se pierde.

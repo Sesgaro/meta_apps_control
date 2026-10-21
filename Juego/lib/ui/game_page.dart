@@ -40,10 +40,49 @@ class _GamePageState extends State<GamePage> {
   Player _me = Player.x;
   PlayMode _mode = PlayMode.slingshot;
 
+  // Marcador de la sesión. [_lastPhase] null = aún no se ve ninguna partida,
+  // así no se cuenta una que ya venía terminada al conectar.
+  final _wins = {Player.x: 0, Player.o: 0};
+  int _draws = 0;
+  Phase? _lastPhase;
+
+  void _countResult() {
+    final s = _link.state;
+    if (s != null &&
+        s.phase == Phase.over &&
+        _lastPhase != null &&
+        _lastPhase != Phase.over) {
+      if (s.isDraw) {
+        _draws++;
+      } else {
+        _wins[s.winnerPlayer] = (_wins[s.winnerPlayer] ?? 0) + 1;
+      }
+    }
+    _lastPhase = s?.phase;
+  }
+
+  String get _scoreText =>
+      'X ${_wins[Player.x]} · O ${_wins[Player.o]} · empates $_draws';
+
+  void _savePrefs() =>
+      PanelBus.savePrefs({'me': _me.code, 'mode': _mode.index});
+
   @override
   void initState() {
     super.initState();
+    _link.addListener(_countResult);
     if (isQuest) {
+      PanelBus.loadPrefs().then((p) {
+        if (!mounted) return;
+        final mode = p['mode'];
+        setState(() {
+          _me = p['me'] == Player.o.code ? Player.o : Player.x;
+          if (mode is int && mode >= 0 && mode < PlayMode.values.length) {
+            _mode = PlayMode.values[mode];
+          }
+        });
+        _publishState();
+      });
       PanelBus.listen(_onPanelMessage);
       _link.addListener(_publishState);
       _link.addListener(_open3dOnConnect);
@@ -117,6 +156,7 @@ class _GamePageState extends State<GamePage> {
       'me': (_link.isDemo ? _link.state?.turn ?? _me : _me).code,
       'mode': _mode.index,
       'status': _statusText(_link.state),
+      'score': _scoreText,
     });
   }
 
@@ -188,6 +228,7 @@ class _GamePageState extends State<GamePage> {
                         showSelectedIcon: false,
                         onSelectionChanged: (s) {
                           setState(() => _me = s.first);
+                          _savePrefs();
                           _publishState();
                         },
                       ),
@@ -204,6 +245,7 @@ class _GamePageState extends State<GamePage> {
                         showSelectedIcon: false,
                         onSelectionChanged: (s) {
                           setState(() => _mode = s.first);
+                          _savePrefs();
                           _publishState();
                         },
                       ),
@@ -234,6 +276,11 @@ class _GamePageState extends State<GamePage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(_statusText(s), style: text.headlineSmall),
+            const SizedBox(height: 4),
+            Text(
+              'Marcador: $_scoreText',
+              style: text.titleMedium?.copyWith(color: scheme.primary),
+            ),
             if (s.phase == Phase.turn) ...[
               const SizedBox(height: 8),
               LinearProgressIndicator(

@@ -48,9 +48,11 @@ import com.meta.spatial.toolkit.createPanelEntity
 import com.meta.spatial.vr.VRFeature
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.random.Random
 
 /// Tablero 3D del gato en el Quest: una mesa virtual frente al usuario, sobre
 /// el passthrough, con la cuadrícula a escala de la máquina, las fichas, la
@@ -92,6 +94,7 @@ class GameActivity3D : AppSystemActivity() {
     }
 
     private val scene3d = BoardScene()
+    private var sfx: Sfx? = null
     private var status: TextView? = null
     private var calibButton: Button? = null
 
@@ -111,6 +114,7 @@ class GameActivity3D : AppSystemActivity() {
     }
 
     override fun onDestroy() {
+        sfx?.release()
         PanelBus.unlisten(busListener)
         PanelBus.stopped(this)
         super.onDestroy()
@@ -126,6 +130,7 @@ class GameActivity3D : AppSystemActivity() {
             -Vector3(0.3f, 1.0f, -0.8f),
             0.3f,
         )
+        sfx = Sfx()
         systemManager.registerSystem(GameSystem())
         PanelBus.send(this, "hello")
     }
@@ -137,14 +142,14 @@ class GameActivity3D : AppSystemActivity() {
                 TextView(ctx).apply {
                     setTextColor(Color.WHITE)
                     setBackgroundColor(Color.argb(190, 40, 10, 22))
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
                     typeface = Typeface.DEFAULT_BOLD
                     gravity = Gravity.CENTER
                     setPadding(24, 8, 24, 8)
                     text = "Esperando datos…"
                 }
             },
-            { _ -> UIPanelSettings(QuadShapeOptions(0.36f, 0.08f)) },
+            { _ -> UIPanelSettings(QuadShapeOptions(0.36f, 0.12f)) },
             { view, _, _ -> status = view as TextView },
         ),
         button(R.id.game3d_new, "Nuevo juego") { PanelBus.send(this, "newGame") },
@@ -240,6 +245,18 @@ class GameActivity3D : AppSystemActivity() {
         lateinit var root: Entity
         lateinit var head: Entity
         lateinit var target: Entity
+        private lateinit var timeBar: Entity
+        private lateinit var landing: Entity
+        private val winDots = mutableListOf<Entity>()
+        private val confetti = mutableListOf<Entity>()
+        private var confettiPos = Array(CONFETTI) { Vector3(0f) }
+        private var confettiVel = Array(CONFETTI) { Vector3(0f) }
+        private var confettiLeft = 0f
+        private var winLook = ""
+        private var barLook = -1
+
+        /// Bamboleo de la garra (local, se suma a la cabeza).
+        var headSway = Vector3(0f)
         lateinit var base: Entity
         private val tiles = mutableListOf<Entity>()
         private val holes = mutableListOf<Entity>()
@@ -353,6 +370,34 @@ class GameActivity3D : AppSystemActivity() {
                 clawParts += box(head, at + Vector3(-0.003f, -0.02f, -0.003f), at + Vector3(0.003f, 0.012f, 0.003f), CLAW, Visible(false))
             }
             target = sphere(root, local(cx, cy, 0.004f), 0.008f, WHITE)
+            // Dónde caerá la pelota mientras apuntas: un disco amarillo.
+            landing = Entity.create(
+                listOf(
+                    Mesh(Uri.parse("mesh://sphere")),
+                    Sphere(0.022f),
+                    material(MARK_B),
+                    Transform(Pose(Vector3(0f), Quaternion())),
+                    Scale(Vector3(1f, 0.12f, 1f)),
+                    TransformParent(root),
+                    Visible(false),
+                ),
+            )
+            // Tiempo del turno: barra al fondo de la mesa que se acorta.
+            timeBar = Entity.create(
+                listOf(
+                    Mesh(Uri.parse("mesh://box")),
+                    Box(Vector3(0f, 0f, -0.006f), Vector3(w, 0.008f, 0.006f)),
+                    material(PLACED),
+                    Transform(Pose(Vector3(-w / 2, 0f, -h / 2 - 0.035f), Quaternion())),
+                    Scale(Vector3(0.001f, 1f, 1f)),
+                    TransformParent(root),
+                ),
+            )
+            // Tres en línea: puntos dorados de la primera a la última casilla.
+            repeat(WIN_DOTS) { winDots += sphere(root, Vector3(0f), cell * 0.07f, GOLD, Visible(false)) }
+            repeat(CONFETTI) { i ->
+                confetti += sphere(root, Vector3(0f), 0.006f, CONFETTI_COLORS[i % CONFETTI_COLORS.size], Visible(false))
+            }
 
             buildSlingshot(h)
             buildClawControls(h)
@@ -392,6 +437,12 @@ class GameActivity3D : AppSystemActivity() {
                 TransformParent(root),
             )
             built = true
+            // Calibración de esta sesión (sobrevive a salir y volver al 3D).
+            savedCalibration?.let { (pose, sc) ->
+                scale = sc
+                calibrated = true
+                place(pose)
+            }
         }
 
         /// Resortera al centro del borde de tu lado: poste, horquilla y pelota.
@@ -466,6 +517,7 @@ class GameActivity3D : AppSystemActivity() {
             val mid = (a + b) * 0.5f
             calibrated = true
             place(Pose(mid + q * Vector3(0f, 0f, -halfH * scale), q))
+            savedCalibration = rootPose to scale
         }
 
         /// Dibuja al otro jugador con su pose (PoseFrame), o lo oculta (null).
@@ -553,10 +605,51 @@ class GameActivity3D : AppSystemActivity() {
             if (cell in 0 until 9) holes[cell].setComponent(Visible(on))
         }
 
+        fun showLanding(l: Vector3?) {
+            landing.setComponent(Visible(l != null))
+            if (l != null) setLocal(landing, Vector3(l.x, 0.004f, l.z))
+        }
+
+        /// Confeti desde el centro del tablero.
+        fun burst() {
+            for (i in 0 until CONFETTI) {
+                confettiPos[i] = Vector3(0f, 0.05f, 0f)
+                confettiVel[i] = Vector3(
+                    (Random.nextFloat() - 0.5f) * 0.8f,
+                    0.8f + Random.nextFloat() * 0.8f,
+                    (Random.nextFloat() - 0.5f) * 0.8f,
+                )
+                confetti[i].setComponent(Visible(true))
+            }
+            confettiLeft = 2.5f
+        }
+
+        fun animate(dt: Float) {
+            if (confettiLeft <= 0f) return
+            confettiLeft -= dt
+            for (i in 0 until CONFETTI) {
+                confettiVel[i] = confettiVel[i] + Vector3(0f, -1.5f * dt, 0f)
+                confettiPos[i] = confettiPos[i] + confettiVel[i] * dt
+                setLocal(confetti[i], confettiPos[i])
+                if (confettiLeft <= 0f) confetti[i].setComponent(Visible(false))
+            }
+        }
+
         fun update() {
             val mine = canMove()
             val claw = clawMode()
-            setLocal(head, local(num("posX"), num("posY"), headLift))
+            setLocal(head, local(num("posX"), num("posY"), headLift) + headSway)
+
+            // Barra de tiempo (solo en turno); roja en los últimos 5 s.
+            val left = num("timeLeft")
+            val frac = if (int("phase") == 1) (left / num("turnSeconds", 20f)).coerceIn(0.001f, 1f) else 0.001f
+            val bar = (frac * 100).toInt() + if (left <= 5f) 1000 else 0
+            if (bar != barLook) {
+                val warn = left <= 5f
+                if ((barLook >= 1000) != warn || barLook < 0) timeBar.setComponent(material(if (warn) MISSED else PLACED))
+                barLook = bar
+                timeBar.setComponent(Scale(Vector3(frac, 1f, 1f)))
+            }
             target.setComponent(Transform(Pose(local(num("refX"), num("refY"), 0.004f), Quaternion())))
 
             val bl = if (mine) 1 else 0
@@ -577,6 +670,7 @@ class GameActivity3D : AppSystemActivity() {
             val ir = int("irCell", -1)
             val last = int("lastCell", -1)
             val lastResult = int("lastResult")
+            drawWinLine(board)
             for (c in 0 until 9) {
                 // Piezas: 0 vacía, 1 X, 2 O.
                 val p = (board?.getOrNull(c) as? Number)?.toInt() ?: 0
@@ -597,6 +691,29 @@ class GameActivity3D : AppSystemActivity() {
                     tiles[c].setComponent(Visible(look != 0))
                     if (look != 0) tiles[c].setComponent(material(when (look) { 1 -> IR; 2 -> PLACED; else -> MISSED }))
                 }
+            }
+        }
+
+        /// Resalta el tres en línea del ganador, si lo hay.
+        private fun drawWinLine(board: List<*>?) {
+            val w = int("winner")
+            val cells = if (w == 1 || w == 2) {
+                WIN_LINES.firstOrNull { l -> l.all { (board?.getOrNull(it) as? Number)?.toInt() == w } }
+            } else {
+                null
+            }
+            val look = cells?.joinToString() ?: ""
+            if (look == winLook) return
+            winLook = look
+            if (cells == null) {
+                winDots.forEach { it.setComponent(Visible(false)) }
+                return
+            }
+            val a = local(geo.cellX(cells[0]), geo.cellY(cells[0]), 0.035f)
+            val b = local(geo.cellX(cells[2]), geo.cellY(cells[2]), 0.035f)
+            for ((i, d) in winDots.withIndex()) {
+                setLocal(d, a + (b - a) * (i.toFloat() / (WIN_DOTS - 1)))
+                d.setComponent(Visible(true))
             }
         }
 
@@ -682,6 +799,13 @@ class GameActivity3D : AppSystemActivity() {
         private var remoteClawDown = false
         private var lastPoseAt = 0L
 
+        // Avisos y sonidos según cambia el estado.
+        private var prevPhase = -1
+        private var prevMine = false
+        private var prevTick = -1
+        private var hadRemote = false
+        private var note = ""
+
         override fun execute() {
             // Antes de rastrear el visor reporta la cabeza en el piso: se espera.
             val viewer = scene.getViewerPose()
@@ -710,6 +834,10 @@ class GameActivity3D : AppSystemActivity() {
             val remote = remotePose.takeIf { now - remoteAt < REMOTE_STALE_NS }
             scene3d.drawAvatar(remote, int("me"))
             remoteClawDown = remote != null && remote.size == POSE_LENGTH && remote[29].toInt() and 8 != 0
+            if (remote != null) hadRemote = true
+            note = if (hadRemote && remote == null) "El otro visor no envía su posición" else ""
+            events()
+            scene3d.animate(dt)
 
             trackResult(now)
             // Lo del otro modo está oculto: que tampoco se pueda agarrar.
@@ -725,6 +853,27 @@ class GameActivity3D : AppSystemActivity() {
         }
 
         // --- Resultado del tiro ------------------------------------------------------
+
+        /// Sonidos de turno, cuenta regresiva y fin de partida; confeti al ganar.
+        private fun events() {
+            val phase = int("phase")
+            val mine = canMove()
+            if (mine && !prevMine) sfx?.play(Sfx.Sound.TURN)
+            val tick = if (mine) num("timeLeft").toInt() else -1
+            if (mine && tick in 0..4 && tick != prevTick) sfx?.play(Sfx.Sound.TICK)
+            if (phase == 3 && prevPhase != 3 && prevPhase != -1) {
+                val w = int("winner")
+                if (w == 1 || w == 2) {
+                    sfx?.play(Sfx.Sound.WIN)
+                    scene3d.burst()
+                } else {
+                    sfx?.play(Sfx.Sound.DRAW)
+                }
+            }
+            prevPhase = phase
+            prevMine = mine
+            prevTick = tick
+        }
 
         private fun fire(now: Long) {
             PanelBus.send(this@GameActivity3D, "fire")
@@ -756,12 +905,14 @@ class GameActivity3D : AppSystemActivity() {
             }
             if (placed && resultCell >= 0) {
                 scene3d.showHole(resultCell, true)
+                sfx?.play(Sfx.Sound.HOLE)
                 shot = Shot.SINKING
             } else {
                 // Rebota: sale hacia arriba y a un lado.
                 val side = if (ballPos.x >= 0) 1f else -1f
                 ballVel = Vector3(side * 0.5f, 1.1f, -0.25f)
                 shot = Shot.BOUNCING
+                sfx?.play(Sfx.Sound.BOUNCE)
             }
         }
 
@@ -776,6 +927,7 @@ class GameActivity3D : AppSystemActivity() {
 
         private fun slingshot(g: Geometry, dt: Float, now: Long) {
             val s = scene3d
+            s.headSway = Vector3(0f)
             val mine = canMove()
             s.setGrabbable(s.ball, mine && (shot == Shot.IDLE || shot == Shot.AIMING))
             when (shot) {
@@ -795,11 +947,14 @@ class GameActivity3D : AppSystemActivity() {
                         s.drawBands(p0)
                         val tLand = landingTime(p0, v)
                         s.drawTrajectory(if (pulled) p0 else null, v, tLand)
+                        s.showLanding(if (pulled) p0 + v * tLand else null)
                         if (pulled) sendMove(g, p0 + v * tLand, now)
                     } else if (pulled && mine) {
                         // Soltó: la cabeza ya va al punto de caída; vuela y se tira.
                         sendMove(g, p0 + v * landingTime(p0, v), now, force = true)
                         fire(now)
+                        sfx?.play(Sfx.Sound.LAUNCH)
+                        s.showLanding(null)
                         ballPos = p0
                         ballVel = v
                         s.drawTrajectory(null, v, 0f)
@@ -879,15 +1034,24 @@ class GameActivity3D : AppSystemActivity() {
             val pressed = s.grabbed(s.button) || handNear(s.toWorld(s.buttonAt), BUTTON_REACH)
             s.setWorld(s.button, s.buttonAt - Vector3(0f, if (pressed) 0.01f else 0f, 0f))
             if (pressed && !buttonDown && mine && idle) {
-                sendMoveMm(clawX, clawY, now, force = true)
+                // Como una grúa de verdad, no cae exactamente donde apuntaste.
+                val wobble = { (Random.nextFloat() - 0.5f) * 2 * CLAW_WOBBLE_MM }
+                sendMoveMm((clawX + wobble()).coerceIn(g.xMin, g.xMax), (clawY + wobble()).coerceIn(g.yMin, g.yMax), now, force = true)
                 fire(now)
+                sfx?.play(Sfx.Sound.CLAW)
                 animStart = now
                 shot = Shot.FLYING
             }
             buttonDown = pressed
 
-            // Garra: baja al tirar, espera abajo el resultado y sube.
+            // Garra: baja al tirar, espera abajo el resultado y sube; al bajar se
+            // bambolea un poco y se va calmando.
             val t = (now - animStart) / 1e9f
+            s.headSway = if (shot == Shot.FLYING || shot == Shot.WAITING) {
+                Vector3(sin(t * 14f) * 0.005f, 0f, cos(t * 11f) * 0.004f) * exp(-1.5f * t)
+            } else {
+                Vector3(0f)
+            }
             s.headLift = when (shot) {
                 Shot.FLYING, Shot.WAITING -> {
                     if (t >= CLAW_DROP_S) shot = Shot.WAITING
@@ -978,7 +1142,9 @@ class GameActivity3D : AppSystemActivity() {
         }
 
         private fun updateStatus() {
-            val text = (game["status"] as? String) ?: "Esperando datos del panel 2D…"
+            val base = (game["status"] as? String) ?: "Esperando datos del panel 2D…"
+            val score = (game["score"] as? String)?.let { "\n$it" } ?: ""
+            val text = base + score + if (note.isEmpty()) "" else "\n$note"
             if (text == statusText) return
             statusText = text
             status?.let { tv -> tv.post { tv.text = text } }
@@ -1018,6 +1184,7 @@ class GameActivity3D : AppSystemActivity() {
         const val CLAW_UP = 0.12f
         const val CLAW_DOWN = 0.03f
         const val CLAW_DROP_S = 0.8f
+        const val CLAW_WOBBLE_MM = 4f      // la garra cae hasta ±4 mm de donde apuntaste
 
         // Calibración y el otro jugador.
         const val MARK_R = 0.015f
@@ -1046,6 +1213,19 @@ class GameActivity3D : AppSystemActivity() {
         val CONSOLE = Color4(0.15f, 0.15f, 0.18f, 1f)
         val BUTTON = Color4(0.95f, 0.10f, 0.20f, 1f)
         val WHITE = Color4(1f, 1f, 1f, 1f)
+        val GOLD = Color4(1.0f, 0.80f, 0.15f, 1f)
+        val CONFETTI_COLORS = listOf(GOLD, Color4(0.2f, 0.8f, 1f, 1f), Color4(1f, 0.3f, 0.6f, 1f), Color4(0.4f, 1f, 0.4f, 1f))
+        const val CONFETTI = 40
+        const val WIN_DOTS = 9
+        val WIN_LINES = listOf(
+            listOf(0, 1, 2), listOf(3, 4, 5), listOf(6, 7, 8),
+            listOf(0, 3, 6), listOf(1, 4, 7), listOf(2, 5, 8),
+            listOf(0, 4, 8), listOf(2, 4, 6),
+        )
+
+        /// Calibración de esta sesión de la app (mesa y escala). Se pierde al
+        /// cerrar la app: el visor cambia de coordenadas entre sesiones.
+        var savedCalibration: Pair<Pose, Float>? = null
         val PIECE_X = Color4(0.74f, 0.0f, 0.29f, 1f)        // rosa del tema
         val PIECE_O = Color4(0.95f, 0.85f, 0.90f, 1f)
         val MARK_A = Color4(0.10f, 0.85f, 0.95f, 1f)

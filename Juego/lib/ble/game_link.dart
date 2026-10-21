@@ -48,6 +48,12 @@ class GameLink extends ChangeNotifier {
   Player? _pendingFire;
   Uint8List? _pendingPose;
 
+  // Reconexión automática si la conexión se cae sola (no al tocar Salir).
+  static const _maxRetries = 10;
+  BluetoothDevice? _lost;
+  int _retries = 0;
+  Timer? _retry;
+
   String get deviceName {
     if (isDemo) return 'Simulación';
     final d = _device;
@@ -56,7 +62,15 @@ class GameLink extends ChangeNotifier {
   }
 
   Future<void> connect(BluetoothDevice device) async {
+    _lost = null;
+    _retries = 0;
     await disconnect();
+    await _connect(device);
+  }
+
+  Future<void> _connect(BluetoothDevice device) async {
+    _retry?.cancel();
+    await _teardown();
     _device = device;
     _error = null;
     _setStatus(LinkStatus.connecting);
@@ -72,8 +86,11 @@ class GameLink extends ChangeNotifier {
         if (s == BluetoothConnectionState.disconnected && _device == device) {
           _commandChar = null;
           _state = null;
-          _error ??= 'Se perdió la conexión';
+          _error = 'Se perdió la conexión; reconectando…';
+          _lost = device;
+          _retries = 0;
           _setStatus(LinkStatus.disconnected);
+          _scheduleRetry();
         }
       });
 
@@ -110,12 +127,34 @@ class GameLink extends ChangeNotifier {
       });
       await state.setNotifyValue(true);
       await state.read();
+      _lost = null;
       _setStatus(LinkStatus.connected);
     } catch (e) {
-      _error = _describe(e);
+      _error = _lost == null
+          ? _describe(e)
+          : 'Se perdió la conexión; reconectando…';
       await _teardown();
       _setStatus(LinkStatus.disconnected);
+      _scheduleRetry();
     }
+  }
+
+  /// Reintenta cada 3 s hasta [_maxRetries] veces mientras haya un enlace
+  /// perdido pendiente.
+  void _scheduleRetry() {
+    final d = _lost;
+    if (d == null) return;
+    if (_retries >= _maxRetries) {
+      _lost = null;
+      _error = 'No se pudo reconectar con ${GameProtocol.deviceName}';
+      notifyListeners();
+      return;
+    }
+    _retries++;
+    _retry?.cancel();
+    _retry = Timer(const Duration(seconds: 3), () {
+      if (_lost == d) _connect(d);
+    });
   }
 
   /// Juega contra una máquina simulada (ver [GameSim]), sin BLE.
@@ -133,6 +172,8 @@ class GameLink extends ChangeNotifier {
   }
 
   Future<void> disconnect() async {
+    _lost = null;
+    _retry?.cancel();
     _error = null;
     await _teardown();
     _setStatus(LinkStatus.disconnected);
@@ -255,6 +296,8 @@ class GameLink extends ChangeNotifier {
 
   @override
   void dispose() {
+    _lost = null;
+    _retry?.cancel();
     _teardown();
     super.dispose();
   }

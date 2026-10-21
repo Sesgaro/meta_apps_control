@@ -54,6 +54,12 @@ viene de [Analysis-of-Control-Systems](https://github.com/santi-bnt/Analysis-of-
    mesa). Cada visor manda su cabeza y manos por la S3 y ve al otro como
    esferas del color de su ficha. En la simulación ves tu propio reflejo al
    otro lado del tablero.
+   En la mesa: barra de tiempo del turno al fondo (roja en los últimos 5 s),
+   disco amarillo donde caerá la pelota, línea dorada y confeti al ganar, y
+   sonidos (liga, hueco, rebote, garra, cuenta regresiva). El marcador de la
+   sesión sale en el letrero y en el panel. La calibración se conserva al
+   volver del 2D mientras no cierres la app; ficha y modo se recuerdan.
+   Si la conexión BLE se cae sola, la app reintenta cada 3 s (hasta 10 veces).
 5. Al tirar, o si se acaba el tiempo (20 s), la ESP espera a que la cabeza se detenga y lee
    los sensores: baldosa verde = ficha puesta, roja = falló u ocupada; azul =
    la casilla que ve la matriz IR en ese momento.
