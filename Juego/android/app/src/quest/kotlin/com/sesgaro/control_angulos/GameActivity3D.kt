@@ -1167,10 +1167,10 @@ class GameActivity3D : AppSystemActivity() {
         const val SLING_DIST = 0.1f        // m del borde de la mesa a la resortera
         const val SLING_H = 0.12f          // m, altura de la pelota en reposo
         const val BALL_R = 0.02f
-        const val MAX_PULL = 0.22f         // m que se puede jalar la liga
+        const val MAX_PULL = 0.25f         // m que se puede jalar la liga
         const val MIN_PULL = 0.03f         // menos que esto no cuenta como tiro
-        const val LAUNCH_K = 5.5f          // (m/s) por m jalado
-        const val GRAVITY = 3.0f           // m/s²
+        const val LAUNCH_K = 6.5f          // (m/s) por m jalado; ayuda a llegar a las filas lejanas
+        const val GRAVITY = 2.5f           // m/s²; arco un poco más largo para cubrir las 9 casillas
         const val BAND_DOTS = 5
         const val TRAJ_DOTS = 14
         const val BOUNCE_NS = 1_500_000_000L
