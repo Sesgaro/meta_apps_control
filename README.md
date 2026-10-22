@@ -38,8 +38,8 @@ pueden instalarse a la vez.
 ```
  Quest 1 ─┐ BLE                       UART
  Quest 2 ─┴──► ESP32-S3 ◄──────────────────► ESP32 normal
-               · árbitro del juego            · eje Y (cremallera)
-               · eje X (husillo T8)           · matriz IR 3×3
+               · árbitro del juego            · eje X (cremallera)
+               · eje Y (husillo T8)           · matriz IR 3×3
 ```
 
 - Cada jugador, en su turno de 20 s, apunta en un tablero 3D del Quest con

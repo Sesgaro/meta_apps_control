@@ -24,8 +24,8 @@ class GameSim {
   static const resolveMaxMs = 12000;
   static const toleranceMm = 2.0;
 
-  /// mm/s: husillo T8 en X (~17 mm/s, ver esp32s3_gato.ino); cremallera en Y.
-  static const speedX = 17.0, speedY = 150.0;
+  /// mm/s: cremallera en X; husillo T8 en Y (~17 mm/s, ver esp32s3_gato.ino).
+  static const speedX = 150.0, speedY = 17.0;
 
   /// shortcut: radio supuesto de lo que ve cada sensor IR; ajustar si se mide.
   static const irRadiusMm = 20.0;

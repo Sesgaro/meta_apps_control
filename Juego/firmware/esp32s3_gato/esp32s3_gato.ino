@@ -1,10 +1,10 @@
-// ESP32-S3 del gato: árbitro del juego, eje X de la máquina cartesiana y
+// ESP32-S3 del gato: árbitro del juego, eje Y de la máquina cartesiana y
 // puente BLE con los dos Meta Quest.
 //
 //   Quest 1 ─┐ BLE                    UART
 //   Quest 2 ─┴──► ESP32-S3 ◄─────────────────► ESP32 normal
-//                 · reglas (gato.h)              · eje Y (cremallera)
-//                 · eje X (husillo)              · matriz IR 3×3
+//                 · reglas (gato.h)              · eje X (cremallera)
+//                 · eje Y (husillo)              · matriz IR 3×3
 //
 // Cada eje se controla en milímetros: el PID trabaja en grados del motor (las
 // ganancias ajustadas valen igual) y la frontera convierte con el avance por
@@ -19,13 +19,22 @@
 
 #include "gato.h"
 
+// SIMULAR=1: prueba sin máquina. La S3 se inventa el movimiento de los dos
+// ejes y lo que ve la matriz IR (como "Probar sin ESP" en la app), pero el
+// árbitro, el BLE y el reenvío de poses son los de verdad: sirve para probar
+// dos visores sin motores ni la ESP32 normal. Se compila con
+//   arduino-cli compile --build-property "compiler.cpp.extra_flags=-DSIMULAR=1" ...
+#ifndef SIMULAR
+#define SIMULAR 0
+#endif
+
 #define DEVICE_NAME       "ESP32S3-Gato"
 #define SERVICE_UUID      "7a1d1000-5e2f-4b8a-9c3d-2f1e0a6b4c11"
 #define COMMAND_CHAR_UUID "7a1d1001-5e2f-4b8a-9c3d-2f1e0a6b4c11"
 #define STATE_CHAR_UUID   "7a1d1002-5e2f-4b8a-9c3d-2f1e0a6b4c11"
 #define POSE_CHAR_UUID    "7a1d1003-5e2f-4b8a-9c3d-2f1e0a6b4c11"
 
-// Motor del eje X
+// Motor del eje Y
 #define EN_L  14
 #define EN_R  12
 #define PWM_L 4
@@ -39,9 +48,9 @@
 const unsigned long UART_BAUD = 115200;
 
 // --- Geometría (calibrar en la máquina) ------------------------------------
-// Eje X: husillo (el eje Z de una BIQU B1: T8) = 8 mm por vuelta del eje de
+// Eje Y: husillo (el eje Z de una BIQU B1: T8) = 8 mm por vuelta del eje de
 // salida del motor (paso × entradas). Si hay otra reducción, inclúyela.
-const float MM_POR_VUELTA_X = 8.0;
+const float MM_POR_VUELTA_Y = 8.0;
 // Recorrido útil de cada eje. La posición al encender es 0 mm (encoders
 // incrementales): enciende con la cabeza en la esquina mínima (X e Y).
 const float X_MIN = 0, X_MAX = 180;
@@ -55,9 +64,9 @@ const float TOLERANCIA_MM = 2.0;
 // --- Juego ---------------------------------------------------------------------
 gato::Juego juego([] {
   gato::Config c;
-  c.turnoMs = 20000;       // el husillo del eje X avanza ~17 mm/s
+  c.turnoMs = 20000;       // el husillo del eje Y avanza ~17 mm/s
   c.quietoMs = 300;
-  c.resolverMaxMs = 12000;  // tras tirar, X puede recorrer los 180 mm
+  c.resolverMaxMs = 12000;  // tras tirar, Y puede recorrer los 180 mm
   return c;
 }());
 
@@ -108,7 +117,7 @@ static bool poseNueva[2] = {false, false};
 // Referencias vigentes de la cabeza, en mm.
 static float refX = 0, refY = 0;
 
-// --- Control del eje X (PID ajustado en el motor) ----------------------------
+// --- Control del eje Y (PID ajustado en el motor) ----------------------------
 const float ENC_PPR    = 11.0;
 const float GEAR_RATIO = 34.0;
 const float CPR        = ENC_PPR * GEAR_RATIO * 4;   // cuadratura x4
@@ -130,12 +139,12 @@ const float I_ZONE   = 5;
 static float e_integral = 0;
 static float last_pos = 0;
 static float d_filt = 0;
-static float posX = 0, pwmX = 0;
+static float posY = 0, pwmY = 0;
 
 static pcnt_unit_handle_t encUnit = nullptr;
 
-static float gradosDeMm(float mm) { return mm * 360.0f / MM_POR_VUELTA_X; }
-static float mmDeGrados(float g) { return g * MM_POR_VUELTA_X / 360.0f; }
+static float gradosDeMm(float mm) { return mm * 360.0f / MM_POR_VUELTA_Y; }
+static float mmDeGrados(float g) { return g * MM_POR_VUELTA_Y / 360.0f; }
 
 static long readEncoder() {
   int c = 0;
@@ -190,9 +199,9 @@ static void drive(float u) {
   }
 }
 
-static void controlX(float dt) {
+static void controlY(float dt) {
   const float pos = readEncoder() / CPR * 360;   // grados del motor
-  const float e = gradosDeMm(refX) - pos;
+  const float e = gradosDeMm(refY) - pos;
 
   d_filt = 0.8 * d_filt + 0.2 * (pos - last_pos) / dt;
   last_pos = pos;
@@ -208,17 +217,17 @@ static void controlX(float dt) {
   }
   u = constrain(u, -255, 255);
   drive(u);
-  posX = mmDeGrados(pos);
-  pwmX = u;
+  posY = mmDeGrados(pos);
+  pwmY = u;
 }
 
-// --- UART con la ESP32 normal (eje Y + matriz IR) ----------------------------
+// --- UART con la ESP32 normal (eje X + matriz IR) ----------------------------
 // Líneas "$...*HH" con checksum XOR, igual que firmware/esp32_eje_y.
 static HardwareSerial &uart = Serial1;
-static float posY = 0;
+static float posX = 0;
 static uint16_t mascaraIr = 0;
-static unsigned long ultimaTelemetriaY = 0;
-static bool hayTelemetriaY = false;
+static unsigned long ultimaTelemetriaX = 0;
+static bool hayTelemetriaX = false;
 
 static uint8_t checksum(const char *s, size_t n) {
   uint8_t c = 0;
@@ -226,12 +235,12 @@ static uint8_t checksum(const char *s, size_t n) {
   return c;
 }
 
-static bool enlaceY() {
-  return hayTelemetriaY && millis() - ultimaTelemetriaY <= UART_TIMEOUT_MS;
+static bool enlaceX() {
+  return hayTelemetriaX && millis() - ultimaTelemetriaX <= UART_TIMEOUT_MS;
 }
 
-// "$T,<posY>,<refY>,<pwm>,<máscara IR>*HH"
-static void procesarLineaY(char *linea) {
+// "$T,<posX>,<refX>,<pwm>,<máscara IR>*HH"
+static void procesarLineaX(char *linea) {
   if (linea[0] != '$') return;
   char *asterisco = strrchr(linea, '*');
   if (asterisco == nullptr || strlen(asterisco) < 3) return;
@@ -244,10 +253,10 @@ static void procesarLineaY(char *linea) {
   int pwm;
   unsigned mascara;
   if (sscanf(cuerpo + 2, "%f,%f,%d,%u", &pos, &ref, &pwm, &mascara) != 4) return;
-  posY = pos;
+  posX = pos;
   mascaraIr = mascara;
-  ultimaTelemetriaY = millis();
-  hayTelemetriaY = true;
+  ultimaTelemetriaX = millis();
+  hayTelemetriaX = true;
 }
 
 static void leerUart() {
@@ -258,7 +267,7 @@ static void leerUart() {
     if (c == '\n' || c == '\r') {
       if (largo > 0) {
         linea[largo] = '\0';
-        procesarLineaY(linea);
+        procesarLineaX(linea);
       }
       largo = 0;
     } else if (largo < sizeof(linea) - 1) {
@@ -269,12 +278,33 @@ static void leerUart() {
   }
 }
 
-// "$R,<refY mm>,<habilitado>*HH"
-static void enviarReferenciaY() {
+// "$R,<refX mm>,<habilitado>*HH"
+static void enviarReferenciaX() {
   char cuerpo[32];
-  const int n = snprintf(cuerpo, sizeof(cuerpo), "R,%.1f,1", refY);
+  const int n = snprintf(cuerpo, sizeof(cuerpo), "R,%.1f,1", refX);
   uart.printf("$%s*%02X\n", cuerpo, checksum(cuerpo, n));
 }
+
+#if SIMULAR
+// Velocidades de la app (lib/ble/game_sim.dart): cremallera en X, husillo en Y.
+const float SIM_VEL_X = 150, SIM_VEL_Y = 17;  // mm/s
+const float SIM_RADIO_IR = 20;                // mm del centro de la casilla
+
+/// Mueve la cabeza hacia la referencia y arma la máscara IR, en vez del
+/// encoder y la UART.
+static void simularMaquina(float dt) {
+  posX += constrain(refX - posX, -SIM_VEL_X * dt, SIM_VEL_X * dt);
+  posY += constrain(refY - posY, -SIM_VEL_Y * dt, SIM_VEL_Y * dt);
+  uint16_t m = 0;
+  for (int i = 0; i < 9; i++) {
+    const float cx = X_CASILLA0 + (i % 3) * X_PASO, cy = Y_CASILLA0 + (i / 3) * Y_PASO;
+    if (fabsf(posX - cx) <= SIM_RADIO_IR && fabsf(posY - cy) <= SIM_RADIO_IR) m |= 1 << i;
+  }
+  mascaraIr = m;
+  ultimaTelemetriaX = millis();
+  hayTelemetriaX = true;
+}
+#endif
 
 // --- BLE -----------------------------------------------------------------------
 static void put16(uint8_t *p, int16_t v) {
@@ -287,7 +317,7 @@ static int16_t decimas(float mm) {
 }
 
 static uint8_t casillaIr() {
-  return enlaceY() ? gato::casillaDeMascara(mascaraIr) : gato::SIN_CASILLA;
+  return enlaceX() ? gato::casillaDeMascara(mascaraIr) : gato::SIN_CASILLA;
 }
 
 static void publicarEstado(unsigned long ahora) {
@@ -306,7 +336,7 @@ static void publicarEstado(unsigned long ahora) {
   put16(f + 22, decimas(refX));
   put16(f + 24, decimas(refY));
   f[26] = casillaIr();
-  f[27] = enlaceY() ? 1 : 0;
+  f[27] = enlaceX() ? 1 : 0;
   put16(f + 28, decimas(X_MIN));
   put16(f + 30, decimas(X_MAX));
   put16(f + 32, decimas(Y_MIN));
@@ -428,11 +458,14 @@ static void atenderComandos(unsigned long ahora) {
 }
 
 static bool cabezaQuieta() {
-  return enlaceY() && fabsf(posX - refX) <= TOLERANCIA_MM && fabsf(posY - refY) <= TOLERANCIA_MM;
+  return enlaceX() && fabsf(posX - refX) <= TOLERANCIA_MM && fabsf(posY - refY) <= TOLERANCIA_MM;
 }
 
 void setup() {
   Serial.begin(115200);
+#if SIMULAR
+  Serial.println("ESP32S3-Gato en modo SIMULAR: sin motores ni UART");
+#else
   pinMode(EN_R, OUTPUT);
   pinMode(EN_L, OUTPUT);
   pinMode(PWM_L, OUTPUT);
@@ -445,6 +478,7 @@ void setup() {
 
   setupEncoder();
   uart.begin(UART_BAUD, SERIAL_8N1, UART_RX, UART_TX);
+#endif
   setupBle();
 }
 
@@ -461,7 +495,9 @@ void loop() {
     }
   }
 
+#if !SIMULAR
   leerUart();
+#endif
 
   const unsigned long now = millis();
   if (now - lastSample < SAMPLE_MS) {
@@ -472,13 +508,19 @@ void loop() {
   lastSample = now;
 
   atenderComandos(now);
-  controlX(dt);
+#if SIMULAR
+  simularMaquina(dt);
+#else
+  controlY(dt);
+#endif
   juego.actualizar(now, cabezaQuieta(), casillaIr());
 
+#if !SIMULAR
   if (now - lastUart >= UART_MS) {
     lastUart = now;
-    enviarReferenciaY();
+    enviarReferenciaX();
   }
+#endif
   if (now - lastState >= STATE_MS) {
     lastState = now;
     publicarEstado(now);

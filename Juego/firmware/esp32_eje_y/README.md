@@ -1,4 +1,4 @@
-# ESP32 normal: eje Y + matriz IR
+# ESP32 normal: eje X + matriz IR
 
 Basado en `Project/ESP32` de Analysis-of-Control-Systems (su README original
 está en `README.origen.md`). Cambios:

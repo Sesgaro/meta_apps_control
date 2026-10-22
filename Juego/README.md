@@ -7,15 +7,15 @@ casilla quedó la cabeza. Si le atinó a una casilla libre, se pone su ficha; si
 no, pierde el turno. Después de su turno los motores quedan bloqueados para él
 y el otro visor toma el control.
 
-Parte del proyecto `App` (control de ángulos por BLE); el firmware del eje Y
-viene de [Analysis-of-Control-Systems](https://github.com/santi-bnt/Analysis-of-Control-Systems)
+Parte del proyecto `App` (control de ángulos por BLE); el firmware del eje X
+(`firmware/esp32_eje_y/`, conserva el nombre) viene de [Analysis-of-Control-Systems](https://github.com/santi-bnt/Analysis-of-Control-Systems)
 (copia de referencia en `referencia/`), con Wi-Fi/MQTT cambiado por UART.
 
 ```
  Quest 1 ─┐ BLE                       UART (TX/RX/GND)
  Quest 2 ─┴──► ESP32-S3 ◄─────────────────────────► ESP32 normal
-               · árbitro: turnos, reloj, tablero     · motor eje Y (cremallera)
-               · motor eje X (husillo T8)            · matriz IR 3×3
+               · árbitro: turnos, reloj, tablero     · motor eje X (cremallera)
+               · motor eje Y (husillo T8)            · matriz IR 3×3
                · BLE para los visores                · posición + qué sensor ve la cabeza
 ```
 
@@ -24,7 +24,7 @@ viene de [Analysis-of-Control-Systems](https://github.com/santi-bnt/Analysis-of-
 | Carpeta | Qué es |
 |---|---|
 | `firmware/esp32s3_gato/` | ESP32-S3 (Arduino IDE / arduino-cli). `gato.h` = reglas sin Arduino. |
-| `firmware/esp32_eje_y/` | ESP32 normal (PlatformIO). Eje Y + sensores IR + UART. |
+| `firmware/esp32_eje_y/` | ESP32 normal (PlatformIO). Eje X + sensores IR + UART. |
 | `firmware/pruebas/` | Pruebas de `gato.h` en la PC. |
 | `lib/` | App Flutter: panel 2D (conexión, ficha, estado, tablero arrastrable). |
 | `android/app/src/quest/.../GameActivity3D.kt` | Tablero 3D inmersivo (Meta Spatial SDK). |
@@ -74,7 +74,7 @@ visor juega con las dos fichas.
 
 ## Cableado
 
-**ESP32-S3** (eje X, igual que en `App`):
+**ESP32-S3** (eje Y, motor y pines como en `App`):
 
 | Señal | GPIO |
 |---|---|
@@ -84,7 +84,7 @@ visor juega con las dos fichas.
 | UART TX → RX de la ESP32 normal | 17 |
 | UART RX ← TX de la ESP32 normal | 18 |
 
-**ESP32 normal** (eje Y, pines del proyecto original):
+**ESP32 normal** (eje X, pines del proyecto original):
 
 | Señal | GPIO |
 |---|---|
@@ -105,7 +105,7 @@ visor juega con las dos fichas.
 
 | Constante | Dónde | Valor actual |
 |---|---|---|
-| `MM_POR_VUELTA_X` | `esp32s3_gato.ino` | 8 mm (husillo T8 del eje Z de la B1) |
+| `MM_POR_VUELTA_Y` | `esp32s3_gato.ino` | 8 mm (husillo T8 del eje Z de la B1) |
 | `MM_POR_VUELTA` | `esp32_eje_y/include/Config.h` | 40 mm (GT2, polea 20 dientes de la BIQU B1) |
 | `X_MIN/X_MAX`, `Y_MIN/Y_MAX` | S3 (y `MIN/MAX_POSITION_MM` en la normal) | 0–180 mm |
 | `X_CASILLA0`, `X_PASO`, `Y_CASILLA0`, `Y_PASO` | S3 | centro 30 mm, paso 60 mm |
@@ -117,10 +117,10 @@ La geometría viaja en el estado BLE, así que la app (2D y 3D) se ajusta sola:
 solo hay que cambiarla en la S3 (y el rango en la normal).
 
 El control de cada eje sigue en grados del motor (las ganancias PID valen
-igual) y solo la frontera convierte mm ↔ grados. El PID del eje X es el
-ajustado en `App` (kp 7.6, ki 51, kd 0.135) y el del eje Y el del repo
+igual) y solo la frontera convierte mm ↔ grados. El PID del eje Y (S3) es el
+ajustado en `App` (kp 7.6, ki 51, kd 0.135) y el del eje X (normal) el del repo
 original (kp 4.51, ki 21.0, kd 0.18): conviene verificarlos con la carga de
-cada carro. El eje X (husillo, 8 mm/vuelta) avanza ~17 mm/s, por eso el turno es de 20 s.
+cada carro. El eje Y (husillo, 8 mm/vuelta) avanza ~17 mm/s, por eso el turno es de 20 s.
 
 ## Protocolos
 
@@ -140,7 +140,7 @@ cada carro. El eje X (husillo, 8 mm/vuelta) avanza ~17 mm/s, por eso el turno es
 
 **UART** (115200 8N1, líneas de texto con checksum XOR estilo NMEA):
 
-- S3 → normal, cada 50 ms: `$R,<referencia Y mm>,<habilitado>*HH`
+- S3 → normal, cada 50 ms: `$R,<referencia X mm>,<habilitado>*HH`
 - normal → S3, cada 50 ms: `$T,<posición mm>,<referencia mm>,<pwm>,<máscara IR>*HH`
 
 Si la normal deja de recibir líneas 0.5 s, apaga su motor; si la S3 deja de
@@ -156,6 +156,11 @@ cd firmware/pruebas && g++ -std=c++17 -Wall -I../esp32s3_gato test_gato.cpp -o t
 # ESP32-S3 (Arduino IDE, placa "ESP32S3 Dev Module", core esp32 3.x)
 arduino-cli compile --fqbn esp32:esp32:esp32s3 firmware/esp32s3_gato
 arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32s3 firmware/esp32s3_gato
+
+# Prueba de dos visores sin máquina: la S3 simula los ejes y la matriz IR
+# (árbitro, BLE y poses de verdad). Para volver al normal, sube sin el flag.
+arduino-cli compile --upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32s3 \
+  --build-property "compiler.cpp.extra_flags=-DSIMULAR=1" firmware/esp32s3_gato
 
 # ESP32 normal (PlatformIO)
 cd firmware/esp32_eje_y && pio run --target upload

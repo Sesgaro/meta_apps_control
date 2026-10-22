@@ -2,17 +2,17 @@
 
 #include <Arduino.h>
 
-// ESP32 normal del gato: mueve el eje Y de la máquina cartesiana y lee la
+// ESP32 normal del gato: mueve el eje X de la máquina cartesiana y lee la
 // matriz de sensores IR. Recibe la referencia de la ESP32-S3 (que hace BLE y
 // lleva el juego) por UART en vez de Wi-Fi/MQTT.
 //
-// El eje Y es un piñón-cremallera (la banda GT2 con polea de 20 dientes del X
+// El eje X es un piñón-cremallera (la banda GT2 con polea de 20 dientes del X
 // de una BIQU B1: 40 mm por vuelta). El
 // PID sigue trabajando en grados del motor, como en el proyecto original (sus
 // ganancias valen igual); solo la frontera cambia: la referencia llega en mm
 // y se convierte a grados, y la posición se reporta en mm.
 
-// --- Motor del eje Y (igual que el proyecto original) ---------------------
+// --- Motor del eje X (igual que el proyecto original) ---------------------
 constexpr int ENC_A = 32;
 constexpr int ENC_B = 33;
 constexpr int RPWM = 25;

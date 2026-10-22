@@ -201,7 +201,7 @@ class GameState {
   final int? irCell;
   final bool irMultiple;
 
-  /// La ESP32 normal (eje Y + sensores) responde por la UART.
+  /// La ESP32 normal (eje X + sensores) responde por la UART.
   final bool yAxisLinked;
   final BoardGeometry geometry;
   final int turnSeconds;
