@@ -1,10 +1,33 @@
+// ================= CONEXIONES ESP32-S3 ================================
+// LDR: salida AO de cada modulo al GPIO indicado (no usar DO).
+// Casilla       0   1   2   3   4   5   6   7   8
+// GPIO AO       1   2   6   7   8   9  10  11  13
+// Matriz:       [0 1 2]  fila 0 = Y minima
+//               [3 4 5]  columna 0 = X minima
+//               [6 7 8]
+// LDR VCC -> 3V3; LDR GND -> GND. AO no debe superar 3.3 V.
+//
+// Motor X (driver BTS7960):
+//   L_EN -> GPIO14    R_EN -> GPIO12
+//   LPWM -> GPIO4     RPWM -> GPIO5
+// Encoder X: A -> GPIO21, B -> GPIO47 (senales a 3.3 V).
+//
+// UART entre placas (115200 baudios):
+//   S3 TX GPIO16 -> ESP32 normal RX GPIO16
+//   S3 RX GPIO18 <- ESP32 normal TX GPIO17
+//   GND comun entre ambas placas, sensores, encoder y driver.
+// Switch de cero X (normalmente abierto): GPIO17 <-> switch <-> GND.
+// Al cerrarse marca posicion y referencia X = 0; no busca el cero moviendose.
+// Quest <-> S3: Bluetooth BLE.
+// ======================================================================
+//
 // ESP32-S3 del gato: árbitro del juego, eje X de la máquina cartesiana y
 // puente BLE con los dos Meta Quest.
 //
 //   Quest 1 ─┐ BLE                    UART
 //   Quest 2 ─┴──► ESP32-S3 ◄─────────────────► ESP32 normal
 //                 · reglas (gato.h)              · eje Y (cremallera)
-//                 · eje X (husillo)              · matriz IR 3×3
+//                 · eje X (husillo) + LDR 3x3
 //
 // Cada eje se controla en milímetros: el PID trabaja en grados del motor (las
 // ganancias ajustadas valen igual) y la frontera convierte con el avance por
@@ -34,9 +57,47 @@
 #define ENC_B 47
 
 // UART con la ESP32 normal (Serial1). Cruzado: TX -> RX, RX <- TX, GND común.
-#define UART_TX 17
+#define UART_TX 16
 #define UART_RX 18
 const unsigned long UART_BAUD = 115200;
+
+// --- Switch de referencia del eje X ------------------------------------
+constexpr int CERO_X_PIN = 17;
+constexpr unsigned long CERO_X_ANTIRREBOTE_MS = 30;
+static int ceroXLectura = HIGH;
+static int ceroXEstable = HIGH;
+static unsigned long ceroXCambioMs = 0;
+
+// --- Sensores LDR: salidas AO conectadas directamente a la ESP32-S3 --------
+// Casilla = fila * 3 + columna. Senales analogicas de hasta 3.3 V.
+constexpr int LDR_PINES[9] = {1, 2, 6, 7, 8, 9, 10, 11, 13};
+// Rango inclusivo de activacion; valores ADC crudos de 12 bits (0 a 4095).
+// Cambia estos dos limites para ajustar la deteccion de las nueve casillas.
+constexpr int LDR_MIN = 100;
+constexpr int LDR_MAX = 200;
+static_assert(0 <= LDR_MIN && LDR_MIN <= LDR_MAX && LDR_MAX <= 4095,
+              "Rango LDR invalido: usa 0 <= MIN <= MAX <= 4095");
+static uint16_t mascaraLdr = 0;
+
+static void iniciarLdr() {
+  analogReadResolution(12);
+  for (int pin : LDR_PINES) {
+    pinMode(pin, INPUT);
+    analogSetPinAttenuation(pin, ADC_11db);
+  }
+}
+
+// Bit i encendido = la lectura AO de la casilla i esta dentro del rango.
+static uint16_t leerMascaraLdr() {
+  uint16_t mascara = 0;
+  for (int i = 0; i < 9; ++i) {
+    const int lectura = analogRead(LDR_PINES[i]);
+    if (lectura >= LDR_MIN && lectura <= LDR_MAX) {
+      mascara |= static_cast<uint16_t>(1u << i);
+    }
+  }
+  return mascara;
+}
 
 // --- Geometría (calibrar en la máquina) ------------------------------------
 // Eje X: husillo (el eje Z de una BIQU B1: T8) = 8 mm por vuelta del eje de
@@ -66,13 +127,13 @@ gato::Juego juego([] {
 //   C0 jugador xLo xHi yLo yHi   mover la cabeza; int16 en décimas de mm.
 //                                Solo cuenta si es el turno de ese jugador.
 //   C1 01                        partida nueva
-//   C2 jugador                   tirar: termina el turno ya y se lee el IR
+//   C2 jugador                   tirar: termina el turno ya y se leen los LDR
 // Estado, característica de estado (lectura + notificación cada 100 ms):
 //   [0] C6  [1] fase  [2] turno  [3..4] tiempo restante (décimas de s)
 //   [5..13] tablero (0 vacía, 1 X, 2 O)  [14] ganador (3 = empate)
 //   [15] último resultado  [16] última casilla  [17] último jugador
 //   [18..25] posX posY refX refY (int16, décimas de mm)
-//   [26] casilla que ve la matriz IR (FF ninguna, FE varias)
+//   [26] casilla que ve la matriz LDR (FF ninguna, FE varias)
 //   [27] banderas: bit0 = enlace UART con la ESP32 normal
 //   [28..35] xMin xMax yMin yMax  [36..43] xCasilla0 xPaso yCasilla0 yPaso
 //   [44] duración del turno (s)
@@ -190,6 +251,27 @@ static void drive(float u) {
   }
 }
 
+// Una puesta a cero por cierre estable, incluso si arranca con el switch cerrado.
+// Debe abrirse de nuevo antes de aceptar otro cierre. No mueve el eje Y.
+static bool atenderCeroX(unsigned long ahora) {
+  const int lectura = digitalRead(CERO_X_PIN);
+  if (lectura != ceroXLectura) {
+    ceroXLectura = lectura;
+    ceroXCambioMs = ahora;
+  }
+  if (lectura == ceroXEstable ||
+      ahora - ceroXCambioMs < CERO_X_ANTIRREBOTE_MS) return false;
+  ceroXEstable = lectura;
+  if (ceroXEstable != LOW) return false;
+
+  drive(0);
+  ESP_ERROR_CHECK(pcnt_unit_clear_count(encUnit));
+  posX = refX = pwmX = 0;
+  e_integral = last_pos = d_filt = 0;
+  Serial.println("[CERO X] Switch cerrado: posicion y referencia = 0 mm");
+  return true;
+}
+
 static void controlX(float dt) {
   const float pos = readEncoder() / CPR * 360;   // grados del motor
   const float e = gradosDeMm(refX) - pos;
@@ -212,11 +294,10 @@ static void controlX(float dt) {
   pwmX = u;
 }
 
-// --- UART con la ESP32 normal (eje Y + matriz IR) ----------------------------
+// --- UART con la ESP32 normal (eje Y) ----------------------------
 // Líneas "$...*HH" con checksum XOR, igual que firmware/esp32_eje_y.
 static HardwareSerial &uart = Serial1;
 static float posY = 0;
-static uint16_t mascaraIr = 0;
 static unsigned long ultimaTelemetriaY = 0;
 static bool hayTelemetriaY = false;
 
@@ -230,7 +311,7 @@ static bool enlaceY() {
   return hayTelemetriaY && millis() - ultimaTelemetriaY <= UART_TIMEOUT_MS;
 }
 
-// "$T,<posY>,<refY>,<pwm>,<máscara IR>*HH"
+// "$T,<posY>,<refY>,<pwm>*HH"
 static void procesarLineaY(char *linea) {
   if (linea[0] != '$') return;
   char *asterisco = strrchr(linea, '*');
@@ -242,10 +323,8 @@ static void procesarLineaY(char *linea) {
 
   float pos, ref;
   int pwm;
-  unsigned mascara;
-  if (sscanf(cuerpo + 2, "%f,%f,%d,%u", &pos, &ref, &pwm, &mascara) != 4) return;
+  if (sscanf(cuerpo + 2, "%f,%f,%d", &pos, &ref, &pwm) != 3) return;
   posY = pos;
-  mascaraIr = mascara;
   ultimaTelemetriaY = millis();
   hayTelemetriaY = true;
 }
@@ -286,8 +365,8 @@ static int16_t decimas(float mm) {
   return (int16_t)constrain(lroundf(mm * 10), -32768L, 32767L);
 }
 
-static uint8_t casillaIr() {
-  return enlaceY() ? gato::casillaDeMascara(mascaraIr) : gato::SIN_CASILLA;
+static uint8_t casillaLdr() {
+  return gato::casillaDeMascara(mascaraLdr);
 }
 
 static void publicarEstado(unsigned long ahora) {
@@ -305,7 +384,7 @@ static void publicarEstado(unsigned long ahora) {
   put16(f + 20, decimas(posY));
   put16(f + 22, decimas(refX));
   put16(f + 24, decimas(refY));
-  f[26] = casillaIr();
+  f[26] = casillaLdr();
   f[27] = enlaceY() ? 1 : 0;
   put16(f + 28, decimas(X_MIN));
   put16(f + 30, decimas(X_MAX));
@@ -444,6 +523,10 @@ void setup() {
   drive(0);
 
   setupEncoder();
+  pinMode(CERO_X_PIN, INPUT_PULLUP);
+  ceroXLectura = digitalRead(CERO_X_PIN);
+  ceroXCambioMs = millis();
+  iniciarLdr();
   uart.begin(UART_BAUD, SERIAL_8N1, UART_RX, UART_TX);
   setupBle();
 }
@@ -472,8 +555,9 @@ void loop() {
   lastSample = now;
 
   atenderComandos(now);
-  controlX(dt);
-  juego.actualizar(now, cabezaQuieta(), casillaIr());
+  if (!atenderCeroX(now)) controlX(dt);
+  mascaraLdr = leerMascaraLdr();
+  juego.actualizar(now, cabezaQuieta(), casillaLdr());
 
   if (now - lastUart >= UART_MS) {
     lastUart = now;

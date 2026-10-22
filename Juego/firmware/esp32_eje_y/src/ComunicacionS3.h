@@ -6,7 +6,7 @@
 // Líneas de texto con checksum, estilo NMEA (XOR de los caracteres entre
 // '$' y '*', en hexadecimal):
 //   S3 -> esta placa, cada 50 ms:  $R,<referencia mm>,<habilitado 0/1>*HH
-//   esta placa -> S3,  cada 50 ms:  $T,<posición mm>,<referencia mm>,<pwm>,<máscara IR>*HH
+//   esta placa -> S3,  cada 50 ms:  $T,<posicion mm>,<referencia mm>,<pwm>*HH
 //
 // Hacia el control todo sigue en grados del motor (ver gradosDeMm en Config.h).
 namespace ComunicacionS3 {

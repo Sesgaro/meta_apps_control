@@ -2,7 +2,7 @@
 
 Gato (tic-tac-toe) jugado con una máquina cartesiana X/Y desde dos Meta Quest.
 Cada jugador, en su turno, arrastra la cabeza de la máquina sobre un tablero
-virtual; al acabarse el tiempo, una matriz de sensores IR dice sobre qué
+virtual; al acabarse el tiempo, una matriz de sensores LDR dice sobre qué
 casilla quedó la cabeza. Si le atinó a una casilla libre, se pone su ficha; si
 no, pierde el turno. Después de su turno los motores quedan bloqueados para él
 y el otro visor toma el control.
@@ -15,16 +15,17 @@ viene de [Analysis-of-Control-Systems](https://github.com/santi-bnt/Analysis-of-
  Quest 1 ─┐ BLE                       UART (TX/RX/GND)
  Quest 2 ─┴──► ESP32-S3 ◄─────────────────────────► ESP32 normal
                · árbitro: turnos, reloj, tablero     · motor eje Y (cremallera)
-               · motor eje X (husillo T8)            · matriz IR 3×3
-               · BLE para los visores                · posición + qué sensor ve la cabeza
+               · motor eje X (husillo T8)            · telemetria del eje Y
+               · BLE para los visores
+               · matriz LDR 3x3 (AO)
 ```
 
 ## Partes
 
 | Carpeta | Qué es |
 |---|---|
-| `firmware/esp32s3_gato/` | ESP32-S3 (Arduino IDE / arduino-cli). `gato.h` = reglas sin Arduino. |
-| `firmware/esp32_eje_y/` | ESP32 normal (PlatformIO). Eje Y + sensores IR + UART. |
+| `firmware/esp32s3_gato/` | ESP32-S3 (Arduino IDE / arduino-cli). `gato.h` = reglas sin Arduino. Lee nueve LDR por AO. |
+| `firmware/esp32_eje_y/` | ESP32 normal (PlatformIO). Eje Y + UART. |
 | `firmware/pruebas/` | Pruebas de `gato.h` en la PC. |
 | `lib/` | App Flutter: panel 2D (conexión, ficha, estado, tablero arrastrable). |
 | `android/app/src/quest/.../GameActivity3D.kt` | Tablero 3D inmersivo (Meta Spatial SDK). |
@@ -41,7 +42,7 @@ viene de [Analysis-of-Control-Systems](https://github.com/santi-bnt/Analysis-of-
    se ve rosa. Se juega solo con las manos:
    - **Resortera**: agarra la pelota roja, jálala hacia ti y suéltala. Mientras
      apuntas, unos puntos marcan la trayectoria y la cabeza de la máquina va a
-     donde caería. Al soltar se tira el turno: si la matriz IR ve la cabeza en
+     donde caería. Al soltar se tira el turno: si la matriz LDR ve la cabeza en
      una casilla libre la pelota se cuela por un hueco; si no, rebota.
    - **Grúa**: inclina el joystick (izquierda) para mover la cabeza y aprieta
      el botón rojo (derecha) para soltar la garra y tirar.
@@ -62,7 +63,7 @@ viene de [Analysis-of-Control-Systems](https://github.com/santi-bnt/Analysis-of-
    Si la conexión BLE se cae sola, la app reintenta cada 3 s (hasta 10 veces).
 5. Al tirar, o si se acaba el tiempo (20 s), la ESP espera a que la cabeza se detenga y lee
    los sensores: baldosa verde = ficha puesta, roja = falló u ocupada; azul =
-   la casilla que ve la matriz IR en ese momento.
+   la casilla que ve la matriz LDR en ese momento.
 6. **Volver a 2D** regresa al panel (la escena 3D oculta las ventanas 2D; el
    panel sigue conectado en segundo plano). Al abrir el 3D el panel se
    minimiza solo, porque mientras está al frente las manos no llegan al 3D.
@@ -81,8 +82,10 @@ visor juega con las dos fichas.
 | Encoder A / B | 21 / 47 |
 | BTS7960 RPWM / LPWM | 5 / 4 |
 | BTS7960 R_EN / L_EN | 12 / 14 |
-| UART TX → RX de la ESP32 normal | 17 |
+| UART TX → RX de la ESP32 normal | 16 |
 | UART RX ← TX de la ESP32 normal | 18 |
+| LDR AO, casillas 0 a 8 | 1, 2, 6, 7, 8, 9, 10, 11, 13 |
+| Switch de cero X, normalmente abierto hacia GND | 17 |
 
 **ESP32 normal** (eje Y, pines del proyecto original):
 
@@ -93,12 +96,16 @@ visor juega con las dos fichas.
 | BTS7960 R_EN / L_EN | 27 / 14 |
 | UART RX ← TX de la S3 | 16 |
 | UART TX → RX de la S3 | 17 |
-| Sensores IR, casillas 0…8 | 4, 13, 18, 19, 21, 22, 23, 34, 35 |
 
 - **GND común** entre las dos ESP, los drivers, los encoders y los sensores.
+- Switch de cero X: GPIO17 de la S3 a GND al cerrarse (`INPUT_PULLUP`).
+  Tras 30 ms estables se detiene el motor X, se borra su contador de encoder
+  y se ponen posicion y referencia X a 0 mm. No hay busqueda automatica.
+  Solo actua una vez por cierre; el eje Y conserva su posicion y referencia.
+- UART actualizado: S3 TX16 a ESP32 normal RX16; ESP32 normal TX17 a S3 RX18.
 - Casilla = fila × 3 + columna; fila 0 = Y mínima, columna 0 = X mínima.
-- Los sensores se consideran activos en **LOW** (`IR_ACTIVO`). 34 y 35 no
-  tienen pull-up interno: el módulo debe dar su nivel o lleva resistencia.
+- Los LDR se leen por AO en la S3 con ADC de 12 bits (0 a 4095). Una casilla
+  esta activa entre `LDR_MIN` y `LDR_MAX`, incluidos (100 a 200 por defecto).
 - Señales de encoder y sensores a **3.3 V**.
 
 ## Qué calibrar
@@ -111,7 +118,7 @@ visor juega con las dos fichas.
 | `X_CASILLA0`, `X_PASO`, `Y_CASILLA0`, `Y_PASO` | S3 | centro 30 mm, paso 60 mm |
 | `turnoMs`, `quietoMs`, `resolverMaxMs` | S3 (`juego`) | 20 s, 0.3 s, 12 s |
 | `TOLERANCIA_MM` | S3 | 2 mm |
-| `IR_PINES`, `IR_ACTIVO` | normal, `Config.h` | ver arriba |
+| `LDR_PINES`, `LDR_MIN`, `LDR_MAX` | S3, `esp32s3_gato.ino` | pines: ver arriba; rango 100 a 200 |
 
 La geometría viaja en el estado BLE, así que la app (2D y 3D) se ajusta sola:
 solo hay que cambiarla en la S3 (y el rango en la normal).
@@ -129,19 +136,19 @@ cada carro. El eje X (husillo, 8 mm/vuelta) avanza ~17 mm/s, por eso el turno es
 - Comandos (`7a1d1001-…`, escritura sin respuesta):
   `C0 jugador xLo xHi yLo yHi` (int16 en décimas de mm; solo cuenta en el
   turno de ese jugador), `C1 01` (partida nueva) y `C2 jugador` (tirar:
-  termina el turno ya y se lee el IR).
+  termina el turno ya y se leen los LDR).
 - Poses, `7a1d1003` (escritura sin respuesta + notificación): `D0 jugador`
   + 28 bytes con cabeza, manos y pelota de un visor en mm del tablero (ver
   `lib/ble/pose_frame.dart`). La S3 no las interpreta: guarda la última de
   cada jugador y la reenvía a todos a 20 Hz.
 - Estado (`7a1d1002-…`, lectura + notificación cada 100 ms, 45 bytes): fase,
   turno, tiempo restante, tablero, ganador, último tiro, posición y referencia
-  de X/Y, casilla IR, enlace UART y la geometría del tablero.
+  de X/Y, casilla LDR, enlace UART y la geometría del tablero.
 
 **UART** (115200 8N1, líneas de texto con checksum XOR estilo NMEA):
 
 - S3 → normal, cada 50 ms: `$R,<referencia Y mm>,<habilitado>*HH`
-- normal → S3, cada 50 ms: `$T,<posición mm>,<referencia mm>,<pwm>,<máscara IR>*HH`
+- normal → S3, cada 50 ms: `$T,<posición mm>,<referencia mm>,<pwm>*HH`
 
 Si la normal deja de recibir líneas 0.5 s, apaga su motor; si la S3 deja de
 recibir telemetría 0.5 s, marca el enlace caído (aviso en la app) y no puede
