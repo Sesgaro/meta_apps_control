@@ -1,6 +1,5 @@
 #include "ComunicacionS3.h"
 #include "Config.h"
-#include "SensoresIr.h"
 
 namespace {
 
@@ -65,9 +64,8 @@ void enviarTelemetria() {
   portEXIT_CRITICAL(&bloqueoDatos);
 
   char cuerpo[64];
-  const int n = snprintf(cuerpo, sizeof(cuerpo), "T,%.1f,%.1f,%d,%u",
-                         mmDeGrados(posicion), mmDeGrados(ref), (int)lroundf(salida),
-                         SensoresIr::leerMascara());
+  const int n = snprintf(cuerpo, sizeof(cuerpo), "T,%.1f,%.1f,%d",
+                         mmDeGrados(posicion), mmDeGrados(ref), (int)lroundf(salida));
   uart.printf("$%s*%02X\n", cuerpo, checksum(cuerpo, n));
 }
 
@@ -106,7 +104,6 @@ void tareaComunicacion(void *) {
 namespace ComunicacionS3 {
 
 void iniciar() {
-  SensoresIr::iniciar();
   uart.begin(UART_BAUD, SERIAL_8N1, UART_RX, UART_TX);
   // La UART corre en el otro núcleo para no bloquear el control.
   xTaskCreatePinnedToCore(tareaComunicacion, "UartS3", 4096, nullptr, 2, nullptr, 0);

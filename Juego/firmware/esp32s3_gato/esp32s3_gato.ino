@@ -6,7 +6,8 @@
 //
 //   ESP32-S3 (este código)          ESP32 normal
 //   · reglas (gato.h)               · motor eje X (cremallera)
-//   · motor eje Y (husillo T8)      · matriz IR 3×3
+//   · motor eje Y (husillo T8)
+//   · matriz LDR 3×3 (fija)
 //
 // Cada eje se controla en milímetros: el PID trabaja en grados del motor (las
 // ganancias ajustadas valen igual) y la frontera convierte con el avance por
@@ -43,6 +44,17 @@
 #define PWM_R 5
 #define ENC_A 21
 #define ENC_B 47
+
+// Matriz de LDR (módulo con salida AO), una por casilla del gato.
+// Índice = fila * 3 + columna; fila 0 = Y mínima, columna 0 = X mínima.
+// ADC1 (1-10) salvo la casilla 8: no quedan más pines ADC1 libres.
+const int LDR_PINES[9] = {1, 2, 3, 6, 7, 8, 9, 10, 11};
+// Lectura de 0 a 4095. El módulo da más voltaje con menos luz: con la cabeza
+// encima (sombra) la lectura sube del umbral. Si tu cabeza lleva luz en vez
+// de tapar, pon LDR_SOMBRA en false. Ajusta el umbral con el monitor serie.
+// shortcut: un solo umbral para las 9; si varían mucho, uno por casilla.
+const int LDR_UMBRAL = 2000;
+const bool LDR_SOMBRA = true;
 
 // UART con la ESP32 normal (Serial1). Cruzado: TX -> RX, RX <- TX, GND común.
 #define UART_TX 17
@@ -223,7 +235,7 @@ static void controlY(float dt) {
   pwmY = u;
 }
 
-// --- UART con la ESP32 normal (eje X + matriz IR) ----------------------------
+// --- UART con la ESP32 normal (eje X) ----------------------------
 // Líneas "$...*HH" con checksum XOR, igual que firmware/esp32_eje_x.
 static HardwareSerial &uart = Serial1;
 static float posX = 0;
@@ -241,7 +253,7 @@ static bool enlaceX() {
   return hayTelemetriaX && millis() - ultimaTelemetriaX <= UART_TIMEOUT_MS;
 }
 
-// "$T,<posX>,<refX>,<pwm>,<máscara IR>*HH"
+// "$T,<posX>,<refX>,<pwm>*HH"
 static void procesarLineaX(char *linea) {
   if (linea[0] != '$') return;
   char *asterisco = strrchr(linea, '*');
@@ -253,10 +265,8 @@ static void procesarLineaX(char *linea) {
 
   float pos, ref;
   int pwm;
-  unsigned mascara;
-  if (sscanf(cuerpo + 2, "%f,%f,%d,%u", &pos, &ref, &pwm, &mascara) != 4) return;
+  if (sscanf(cuerpo + 2, "%f,%f,%d", &pos, &ref, &pwm) != 3) return;
   posX = pos;
-  mascaraIr = mascara;
   ultimaTelemetriaX = millis();
   hayTelemetriaX = true;
 }
@@ -318,8 +328,24 @@ static int16_t decimas(float mm) {
   return (int16_t)constrain(lroundf(mm * 10), -32768L, 32767L);
 }
 
+static void leerLdr() {
+  static unsigned long ultimoLog = 0;
+  uint16_t m = 0;
+  int lecturas[9];
+  for (int i = 0; i < 9; i++) {
+    lecturas[i] = analogRead(LDR_PINES[i]);
+    if ((lecturas[i] > LDR_UMBRAL) == LDR_SOMBRA) m |= 1 << i;
+  }
+  mascaraIr = m;
+  // Para calibrar LDR_UMBRAL: lecturas por el monitor serie cada 0.5 s.
+  if (millis() - ultimoLog >= 500) {
+    ultimoLog = millis();
+    for (int i = 0; i < 9; i++) Serial.printf("%d%c", lecturas[i], i < 8 ? ' ' : '\n');
+  }
+}
+
 static uint8_t casillaIr() {
-  return enlaceX() ? gato::casillaDeMascara(mascaraIr) : gato::SIN_CASILLA;
+  return gato::casillaDeMascara(mascaraIr);
 }
 
 static void publicarEstado(unsigned long ahora) {
@@ -514,6 +540,7 @@ void loop() {
   simularMaquina(dt);
 #else
   controlY(dt);
+  leerLdr();
 #endif
   juego.actualizar(now, cabezaQuieta(), casillaIr());
 

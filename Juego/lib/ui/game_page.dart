@@ -298,8 +298,8 @@ class _GamePageState extends State<GamePage> {
             if (!s.yAxisLinked) ...[
               const SizedBox(height: 8),
               Text(
-                'La ESP32 del eje X no responde por la UART: el eje X y los '
-                'sensores IR no funcionan.',
+                'La ESP32 del eje X no responde por la UART: el eje X no '
+                'funciona.',
                 style: text.bodyMedium?.copyWith(color: scheme.error),
               ),
             ],

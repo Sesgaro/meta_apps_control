@@ -8,7 +8,7 @@ passthrough + escena 3D inmersiva con Meta Spatial SDK).
 | Proyecto | Qué hace | Hardware |
 |---|---|---|
 | [`Perilla_Flutter/`](Perilla_Flutter/README.md) | Perilla para mandar un ángulo a un motor y ver su posición real. | 1 ESP32-S3, 1 motor |
-| [`Juego/`](Juego/README.md) | Gato (tic-tac-toe) en una máquina cartesiana X/Y, jugado por dos Quest. | ESP32-S3 + ESP32 normal, 2 motores, matriz IR 3×3 |
+| [`Juego/`](Juego/README.md) | Gato (tic-tac-toe) en una máquina cartesiana X/Y, jugado por dos Quest. | ESP32-S3 + ESP32 normal, 2 motores, matriz LDR 3×3 |
 
 `Juego` nació como copia de `Perilla_Flutter`: comparten la base (tema,
 conexión BLE, paneles del Quest, Spatial SDK) y el PID del motor, pero son
@@ -39,13 +39,14 @@ pueden instalarse a la vez.
  Quest 1 ─┐ BLE                       UART
  Quest 2 ─┴──► ESP32-S3 ◄──────────────────► ESP32 normal
                · árbitro del juego            · eje X (cremallera)
-               · eje Y (husillo T8)           · matriz IR 3×3
+               · eje Y (husillo T8)
+               · matriz LDR 3×3
 ```
 
 - Cada jugador, en su turno de 20 s, apunta en un tablero 3D del Quest con
   una **resortera** (la cabeza va a donde caería la pelota) o una **grúa**
   (joystick y botón); los motores X/Y mueven la cabeza. El teléfono solo mira.
-- Al acabarse el tiempo los motores se bloquean y la matriz IR dice sobre qué
+- Al acabarse el tiempo los motores se bloquean y la matriz LDR dice sobre qué
   casilla quedó la cabeza: casilla libre = ficha; ninguna, varias u ocupada =
   turno perdido. Después controla el otro visor.
 - Los ejes se controlan en milímetros (8 mm por vuelta en X, 40 mm en Y); el

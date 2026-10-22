@@ -2,8 +2,8 @@
 
 #include <Arduino.h>
 
-// ESP32 normal del gato: mueve el eje X de la máquina cartesiana y lee la
-// matriz de sensores IR. Recibe la referencia de la ESP32-S3 (que hace BLE y
+// ESP32 normal del gato: mueve el eje X de la máquina cartesiana (la matriz de
+// LDR la lee la S3). Recibe la referencia de la ESP32-S3 (que hace BLE y
 // lleva el juego) por UART en vez de Wi-Fi/MQTT.
 //
 // El eje X es un piñón-cremallera (la banda GT2 con polea de 20 dientes del X
@@ -31,19 +31,10 @@ constexpr unsigned long TELEMETRY_PERIOD_MS = 100;   // monitor serie USB
 constexpr int UART_RX = 16;
 constexpr int UART_TX = 17;
 constexpr unsigned long UART_BAUD = 115200;
-// Cada cuánto se le manda a la S3 la posición y los sensores.
+// Cada cuánto se le manda a la S3 la posición.
 constexpr unsigned long UART_TELEMETRY_MS = 50;
 // Sin órdenes de la S3 en este tiempo se apaga el motor (la S3 manda a 20 Hz).
 constexpr unsigned long STALE_COMMAND_TIMEOUT_MS = 500;
-
-// --- Matriz IR (una casilla del gato por sensor) ---------------------------
-// Índice = fila * 3 + columna; fila 0 = Y mínima, columna 0 = X mínima.
-// 34 y 35 son solo entrada y no tienen pull-up interno: el módulo IR debe
-// dar su propio nivel (la mayoría lo hace) o hay que poner una resistencia.
-constexpr int IR_PINES[9] = {4, 13, 18, 19, 21, 22, 23, 34, 35};
-// Nivel que da el sensor cuando ve la cabeza. Los módulos IR comunes
-// (receptor/obstáculo) ponen la salida en LOW al detectar.
-constexpr int IR_ACTIVO = LOW;
 
 // Selecciona un solo controlador: deja su define activo y comenta los otros.
 // #define CONTROL_MODE_P
