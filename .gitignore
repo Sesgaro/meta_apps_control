@@ -54,7 +54,7 @@ key.properties
 # --- Firmware -------------------------------------------------------------------
 # Binarios que exporta el Arduino IDE junto al sketch.
 /*/firmware/**/build/
-# PlatformIO (Juego/firmware/esp32_eje_y).
+# PlatformIO (Juego/firmware/esp32_eje_x).
 .pio/
 # Binario de las pruebas del gato (Juego/firmware/pruebas).
 /Juego/firmware/pruebas/test_gato

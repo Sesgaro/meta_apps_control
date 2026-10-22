@@ -8,7 +8,7 @@ no, pierde el turno. Después de su turno los motores quedan bloqueados para él
 y el otro visor toma el control.
 
 Parte del proyecto `App` (control de ángulos por BLE); el firmware del eje X
-(`firmware/esp32_eje_y/`, conserva el nombre) viene de [Analysis-of-Control-Systems](https://github.com/santi-bnt/Analysis-of-Control-Systems)
+(`firmware/esp32_eje_x/`) viene de [Analysis-of-Control-Systems](https://github.com/santi-bnt/Analysis-of-Control-Systems)
 (copia de referencia en `referencia/`), con Wi-Fi/MQTT cambiado por UART.
 
 ```
@@ -24,7 +24,7 @@ Parte del proyecto `App` (control de ángulos por BLE); el firmware del eje X
 | Carpeta | Qué es |
 |---|---|
 | `firmware/esp32s3_gato/` | ESP32-S3 (Arduino IDE / arduino-cli). `gato.h` = reglas sin Arduino. |
-| `firmware/esp32_eje_y/` | ESP32 normal (PlatformIO). Eje X + sensores IR + UART. |
+| `firmware/esp32_eje_x/` | ESP32 normal (PlatformIO). Eje X + sensores IR + UART. |
 | `firmware/pruebas/` | Pruebas de `gato.h` en la PC. |
 | `lib/` | App Flutter: panel 2D (conexión, ficha, estado, tablero arrastrable). |
 | `android/app/src/quest/.../GameActivity3D.kt` | Tablero 3D inmersivo (Meta Spatial SDK). |
@@ -106,7 +106,7 @@ visor juega con las dos fichas.
 | Constante | Dónde | Valor actual |
 |---|---|---|
 | `MM_POR_VUELTA_Y` | `esp32s3_gato.ino` | 8 mm (husillo T8 del eje Z de la B1) |
-| `MM_POR_VUELTA` | `esp32_eje_y/include/Config.h` | 40 mm (GT2, polea 20 dientes de la BIQU B1) |
+| `MM_POR_VUELTA` | `esp32_eje_x/include/Config.h` | 40 mm (GT2, polea 20 dientes de la BIQU B1) |
 | `X_MIN/X_MAX`, `Y_MIN/Y_MAX` | S3 (y `MIN/MAX_POSITION_MM` en la normal) | 0–180 mm |
 | `X_CASILLA0`, `X_PASO`, `Y_CASILLA0`, `Y_PASO` | S3 | centro 30 mm, paso 60 mm |
 | `turnoMs`, `quietoMs`, `resolverMaxMs` | S3 (`juego`) | 20 s, 0.3 s, 12 s |
@@ -163,7 +163,7 @@ arduino-cli compile --upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32s3 \
   --build-property "compiler.cpp.extra_flags=-DSIMULAR=1" firmware/esp32s3_gato
 
 # ESP32 normal (PlatformIO)
-cd firmware/esp32_eje_y && pio run --target upload
+cd firmware/esp32_eje_x && pio run --target upload
 
 # App
 flutter build apk --release --flavor quest   # Meta Quest

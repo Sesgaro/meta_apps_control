@@ -2,9 +2,11 @@
 // puente BLE con los dos Meta Quest.
 //
 //   Quest 1 ─┐ BLE                    UART
-//   Quest 2 ─┴──► ESP32-S3 ◄─────────────────► ESP32 normal
-//                 · reglas (gato.h)              · eje X (cremallera)
-//                 · eje Y (husillo)              · matriz IR 3×3
+//   Quest 2 ─┴──► ESP32-S3 ◄─────────────────► ESP32 normal (esp32_eje_x)
+//
+//   ESP32-S3 (este código)          ESP32 normal
+//   · reglas (gato.h)               · motor eje X (cremallera)
+//   · motor eje Y (husillo T8)      · matriz IR 3×3
 //
 // Cada eje se controla en milímetros: el PID trabaja en grados del motor (las
 // ganancias ajustadas valen igual) y la frontera convierte con el avance por
@@ -222,7 +224,7 @@ static void controlY(float dt) {
 }
 
 // --- UART con la ESP32 normal (eje X + matriz IR) ----------------------------
-// Líneas "$...*HH" con checksum XOR, igual que firmware/esp32_eje_y.
+// Líneas "$...*HH" con checksum XOR, igual que firmware/esp32_eje_x.
 static HardwareSerial &uart = Serial1;
 static float posX = 0;
 static uint16_t mascaraIr = 0;
