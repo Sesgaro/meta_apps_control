@@ -12,7 +12,8 @@ import 'game_protocol.dart';
 ///   [2..7]   cabeza x y h (int16)   [8..10] hacia dónde mira x y h (int8, ×127)
 ///   [11..16] mano izquierda         [17..22] mano derecha
 ///   [23..28] pelota                 [29] banderas: bit0 mano izq, bit1 mano
-///                                        der, bit2 pelota, bit3 garra abajo
+///                                        der, bit2 pelota, bit3 garra abajo,
+///                                        bit4 puño izq, bit5 puño der
 class PoseFrame {
   PoseFrame._();
 
@@ -49,7 +50,7 @@ class PoseFrame {
     out.setRange(11, 17, out.sublist(17, 23));
     out.setRange(17, 23, left);
     final f = out[29];
-    out[29] = (f & ~3) | ((f & 1) << 1) | ((f & 2) >> 1);
+    out[29] = (f & ~0x33) | ((f & 0x11) << 1) | ((f & 0x22) >> 1);
     out[1] = mirrorId;
     return out;
   }

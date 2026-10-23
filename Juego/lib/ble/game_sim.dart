@@ -30,6 +30,10 @@ class GameSim {
   /// shortcut: radio supuesto de lo que ve cada sensor IR; ajustar si se mide.
   static const irRadiusMm = 20.0;
 
+  /// Calibración (ver esp32s3_gato.ino): en la simulación calibra uno solo.
+  static const calibX = [30.0, 150.0], calibY = [30.0, 150.0];
+  int calibStep = 0, calibDone = 0, calibWho = 0;
+
   Phase phase = Phase.waiting;
   Player turn = Player.x;
   Player _starts = Player.x;
@@ -44,6 +48,7 @@ class GameSim {
   int? _stillSince;
 
   void newGame() {
+    calibStep = 0;
     board.fillRange(0, 9, Player.none);
     turn = _starts;
     _starts = _starts.other;
@@ -64,6 +69,35 @@ class GameSim {
   void fire(Player player) {
     if (phase != Phase.turn || player != turn) return;
     _startResolving();
+  }
+
+  /// Botón Calibrar: empieza (con la partida en espera o terminada) o cancela.
+  void calibrate(Player player) {
+    if (calibStep != 0) {
+      calibStep = 0;
+    } else if (phase == Phase.waiting || phase == Phase.over) {
+      calibWho = 1 << (player.code - 1);
+      _calibPoint(1);
+    }
+  }
+
+  void touch(Player player, int step) {
+    if (step != calibStep) return;
+    calibDone |= 1 << (player.code - 1);
+    if (calibDone & calibWho == calibWho) {
+      if (calibStep == 1) {
+        _calibPoint(2);
+      } else {
+        calibStep = 0;
+      }
+    }
+  }
+
+  void _calibPoint(int step) {
+    calibStep = step;
+    calibDone = 0;
+    refX = calibX[step - 1];
+    refY = calibY[step - 1];
   }
 
   int? get irCell {
@@ -160,5 +194,8 @@ class GameSim {
     yAxisLinked: true,
     geometry: geometry,
     turnSeconds: turnMs ~/ 1000,
+    calibStep: calibStep,
+    calibDone: calibDone,
+    calibWho: calibWho,
   );
 }

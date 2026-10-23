@@ -90,6 +90,8 @@ gato::Juego juego([] {
 //                                Solo cuenta si es el turno de ese jugador.
 //   C1 01                        partida nueva
 //   C2 jugador                   tirar: termina el turno ya y se lee el IR
+//   C3 jugador                   botón Calibrar (o Cancelar, si ya se calibra)
+//   C4 jugador paso              ese visor ya tocó la cabeza en el punto paso
 // Estado, característica de estado (lectura + notificación cada 100 ms):
 //   [0] C6  [1] fase  [2] turno  [3..4] tiempo restante (décimas de s)
 //   [5..13] tablero (0 vacía, 1 X, 2 O)  [14] ganador (3 = empate)
@@ -99,6 +101,8 @@ gato::Juego juego([] {
 //   [27] banderas: bit0 = enlace UART con la ESP32 normal
 //   [28..35] xMin xMax yMin yMax  [36..43] xCasilla0 xPaso yCasilla0 yPaso
 //   [44] duración del turno (s)
+//   [45] calibración: 0 no, 1-2 punto al que va la cabeza
+//   [46] calibración: bits 0-1 quién ya tocó el punto, bits 4-5 quién calibra
 // Poses, característica de poses (escritura sin respuesta + notificación):
 //   D0 jugador ... (30 bytes) cabeza, manos y pelota de un visor en mm del
 //   tablero (ver lib/ble/pose_frame.dart). La ESP no las interpreta: guarda
@@ -106,8 +110,10 @@ gato::Juego juego([] {
 constexpr uint8_t CMD_MOVER = 0xC0;
 constexpr uint8_t CMD_JUEGO = 0xC1;
 constexpr uint8_t CMD_TIRAR = 0xC2;
+constexpr uint8_t CMD_CALIBRAR = 0xC3;
+constexpr uint8_t CMD_TOQUE = 0xC4;
 constexpr uint8_t STATE_HEADER = 0xC6;
-constexpr size_t STATE_LENGTH = 45;
+constexpr size_t STATE_LENGTH = 47;
 constexpr uint8_t POSE_HEADER = 0xD0;
 constexpr size_t POSE_LENGTH = 30;
 constexpr unsigned long POSE_MS = 50;  // reenvío: 20 Hz como máximo
@@ -127,6 +133,26 @@ static uint8_t tiroJugador = 0;   // 0 = nadie tiró
 // Última pose de cada jugador (índice = jugador - 1) y si falta reenviarla.
 static uint8_t poses[2][POSE_LENGTH];
 static bool poseNueva[2] = {false, false};
+static unsigned long ultimaPose[2] = {0, 0};
+// Calibración pedida por BLE: bit (jugador - 1) apretó Calibrar / tocó el punto.
+static uint8_t botonCalibrar = 0;
+static uint8_t toqueCalib = 0;
+static uint8_t toquePaso[2] = {0, 0};
+
+// --- Calibración de los visores ------------------------------------------------
+// Cada visor alinea su tablero virtual con la máquina tocando la cabeza real
+// con el índice en dos puntos conocidos. Empieza cuando los dos aprietan
+// Calibrar con menos de CALIB_JUNTOS_MS de diferencia (o uno solo, si el otro
+// no manda poses); solo con la partida en espera o terminada. La cabeza va al
+// punto 1, y pasa al 2 (y luego termina) cuando todos los que calibran lo tocaron.
+const float CALIB_X[2] = {X_CASILLA0, X_CASILLA0 + 2 * X_PASO};   // centros de las casillas 0 y 8
+const float CALIB_Y[2] = {Y_CASILLA0, Y_CASILLA0 + 2 * Y_PASO};
+const unsigned long CALIB_JUNTOS_MS = 2000;
+const unsigned long POSE_ACTIVA_MS = 3000;   // sin poses en este tiempo, el visor no está
+static uint8_t calibPaso = 0;     // 0 = no se calibra; 1, 2 = punto actual
+static uint8_t calibQuien = 0;    // bit0 X, bit1 O
+static uint8_t calibHechos = 0;   // quién ya tocó el punto actual
+static unsigned long calibPide[2] = {0, 0};
 
 // Referencias vigentes de la cabeza, en mm.
 static float refX = 0, refY = 0;
@@ -374,6 +400,8 @@ static void publicarEstado(unsigned long ahora) {
   put16(f + 40, decimas(Y_CASILLA0));
   put16(f + 42, decimas(Y_PASO));
   f[44] = juego.cfg.turnoMs / 1000;
+  f[45] = calibPaso;
+  f[46] = calibHechos | (calibQuien << 4);
   stateChar->setValue(f, STATE_LENGTH);
   if (bleServer->getConnectedCount() > 0) stateChar->notify();
 }
@@ -395,6 +423,15 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
       portENTER_CRITICAL(&bloqueo);
       tiroJugador = d[1];
       portEXIT_CRITICAL(&bloqueo);
+    } else if (len == 2 && d[0] == CMD_CALIBRAR && (d[1] == gato::JUGADOR_X || d[1] == gato::JUGADOR_O)) {
+      portENTER_CRITICAL(&bloqueo);
+      botonCalibrar |= 1 << (d[1] - 1);
+      portEXIT_CRITICAL(&bloqueo);
+    } else if (len == 3 && d[0] == CMD_TOQUE && (d[1] == gato::JUGADOR_X || d[1] == gato::JUGADOR_O)) {
+      portENTER_CRITICAL(&bloqueo);
+      toqueCalib |= 1 << (d[1] - 1);
+      toquePaso[d[1] - 1] = d[2];
+      portEXIT_CRITICAL(&bloqueo);
     } else if (len == 2 && d[0] == CMD_JUEGO && d[1] == 0x01) {
       portENTER_CRITICAL(&bloqueo);
       pedirPartida = true;
@@ -411,6 +448,7 @@ class PoseCallbacks : public BLECharacteristicCallbacks {
     portENTER_CRITICAL(&bloqueo);
     memcpy(poses[d[1] - 1], d, POSE_LENGTH);
     poseNueva[d[1] - 1] = true;
+    ultimaPose[d[1] - 1] = millis();
     portEXIT_CRITICAL(&bloqueo);
   }
 };
@@ -439,7 +477,7 @@ class ServerCallbacks : public BLEServerCallbacks {
 
 static void setupBle() {
   BLEDevice::init(DEVICE_NAME);
-  BLEDevice::setMTU(100);   // el estado mide 45 bytes
+  BLEDevice::setMTU(100);   // el estado mide 47 bytes
 
   bleServer = BLEDevice::createServer();
   bleServer->setCallbacks(new ServerCallbacks());
@@ -465,6 +503,49 @@ static void setupBle() {
 
 /// Aplica los comandos que llegaron por BLE. Los movimientos solo cuentan si
 /// es el turno de ese jugador: así se "bloquean" los motores para el otro.
+static void irAlPunto(uint8_t paso) {
+  calibPaso = paso;
+  calibHechos = 0;
+  refX = CALIB_X[paso - 1];
+  refY = CALIB_Y[paso - 1];
+}
+
+/// Calibración: empieza con los dos botones (o uno, si el otro visor no está),
+/// avanza de punto cuando todos los que calibran tocaron la cabeza y se
+/// cancela con otro botón.
+static void atenderCalibracion(unsigned long ahora, uint8_t botones, uint8_t toques,
+                               const uint8_t pasos[2], const unsigned long poseAt[2]) {
+  if (calibPaso) {
+    if (botones) {
+      calibPaso = 0;
+      return;
+    }
+    for (int i = 0; i < 2; i++) {
+      if (toques & (1 << i) && pasos[i] == calibPaso) calibHechos |= 1 << i;
+    }
+    if ((calibHechos & calibQuien) == calibQuien) {
+      if (calibPaso == 1) irAlPunto(2);
+      else calibPaso = 0;
+    }
+    return;
+  }
+  for (int i = 0; i < 2; i++) {
+    if (botones & (1 << i)) calibPide[i] = ahora;
+  }
+  if (juego.fase != gato::ESPERANDO && juego.fase != gato::TERMINADO) return;
+  uint8_t quien = 0;
+  for (int i = 0; i < 2; i++) {
+    const bool pide = calibPide[i] && ahora - calibPide[i] < CALIB_JUNTOS_MS;
+    const bool esta = poseAt[i] && ahora - poseAt[i] < POSE_ACTIVA_MS;
+    if (pide) quien |= 1 << i;
+    else if (esta) return;   // el otro visor está pero no ha apretado: se le espera
+  }
+  if (!quien) return;
+  calibQuien = quien;
+  calibPide[0] = calibPide[1] = 0;
+  irAlPunto(1);
+}
+
 static void atenderComandos(unsigned long ahora) {
   portENTER_CRITICAL(&bloqueo);
   const bool partida = pedirPartida;
@@ -472,11 +553,19 @@ static void atenderComandos(unsigned long ahora) {
   const uint8_t jugador = pedidoJugador;
   const float x = pedidoX, y = pedidoY;
   const uint8_t tiro = tiroJugador;
+  const uint8_t botones = botonCalibrar, toques = toqueCalib;
+  const uint8_t pasos[2] = {toquePaso[0], toquePaso[1]};
+  const unsigned long poseAt[2] = {ultimaPose[0], ultimaPose[1]};
   pedirPartida = hayPedido = false;
   tiroJugador = 0;
+  botonCalibrar = toqueCalib = 0;
   portEXIT_CRITICAL(&bloqueo);
 
-  if (partida) juego.nueva(ahora);
+  if (partida) {
+    calibPaso = 0;
+    juego.nueva(ahora);
+  }
+  atenderCalibracion(ahora, botones, toques, pasos, poseAt);
   if (pedido && juego.puedeMover(jugador)) {
     refX = constrain(x, X_MIN, X_MAX);
     refY = constrain(y, Y_MIN, Y_MAX);

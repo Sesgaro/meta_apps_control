@@ -46,15 +46,31 @@ Parte del proyecto `App` (control de ángulos por BLE); el firmware del eje X
      una casilla libre la pelota se cuela por un hueco; si no, rebota.
    - **Grúa**: inclina el joystick (izquierda) para mover la cabeza y aprieta
      el botón rojo (derecha) para soltar la garra y tirar.
-   Las fichas usan los modelos `PiezaX.stl` / `PiezaO.stl`; si los cambias,
-   regenera los GLB con `python3 tool/stl_a_glb.py`.
-   **Dos visores**: para que los dos vean el tablero en el mismo lugar, cada
-   uno toca **Calibrar**, pone el marcador cian en la esquina izquierda de su
-   lado del tablero y el amarillo en la derecha, y toca **Listo** (los dos
-   sobre los mismos dos puntos reales; sin tablero sirven dos marcas en una
-   mesa). Cada visor manda su cabeza y manos por la S3 y ve al otro como
-   esferas del color de su ficha. En la simulación ves tu propio reflejo al
-   otro lado del tablero.
+   Los modelos fuente están en `modelos/` (exportados de Blender) y se
+   convierten a `android/app/src/quest/assets/models/` con:
+   - `python3 tool/modelos_a_glb.py`: fichas (`cross2.glb`, `circle2.glb`) y
+     resortera (`slingshot3.glb`); de cada GLB toma solo su objeto.
+   - `python3 tool/pata_a_glb.py`: la pata de gato (`pata_modelo.glb`),
+     riggeada con 2 huesos y horneada en 4 cuadros de abierta a cerrada, gris
+     (X) y naranja (O). En cada mano llevas una, del color de tu ficha, en vez
+     de la mano transparente; se cierra con tu mano (rastreo de cuerpo: la app
+     pide ese permiso).
+   - `python3 tool/cabeza_a_glb.py`: al otro jugador lo ves como un gato (gris
+     si es X, naranja si es O) con la cabeza `cabeza_gato.glb` y la cara de
+     `sprites.png` según cómo le va (normal, falló su tiro, perdió, acertó o
+     ganó), más sus patas.
+   **Dos visores**: para que los dos vean el tablero sobre la máquina real,
+   con la partida en espera o terminada los dos aprietan **Calibrar** (en el
+   letrero o el botón cian junto al tablero) a la vez (menos de 2 s; si el
+   otro visor no está conectado basta uno). El tablero se pone verde, la S3
+   lleva la cabeza al centro de la casilla 0 y una pelota marca dónde está:
+   cada jugador toca la cabeza real con la punta del índice (apuntando) y se
+   queda quieto 0.8 s. Cuando los dos tocaron, la cabeza va a la casilla 8 y
+   se repite; con los dos toques cada visor acomoda su mesa (giro, escala y
+   altura). En la simulación la pelota flota donde estaría la cabeza.
+   `HEAD_TOUCH_M` (GameActivity3D.kt) es la altura de la parte de arriba de la
+   cabeza real sobre la mesa: mídela. Cada visor manda su cabeza y manos por
+   la S3 y ve al otro como gato; en la simulación ves tu propio reflejo.
    En la mesa: barra de tiempo del turno al fondo (roja en los últimos 5 s),
    disco amarillo donde caerá la pelota, línea dorada y confeti al ganar, y
    sonidos (liga, hueco, rebote, garra, cuenta regresiva). El marcador de la
@@ -132,15 +148,17 @@ cada carro. El eje Y (husillo, 8 mm/vuelta) avanza ~17 mm/s, por eso el turno es
 
 - Comandos (`7a1d1001-…`, escritura sin respuesta):
   `C0 jugador xLo xHi yLo yHi` (int16 en décimas de mm; solo cuenta en el
-  turno de ese jugador), `C1 01` (partida nueva) y `C2 jugador` (tirar:
-  termina el turno ya y se leen las LDR).
+  turno de ese jugador), `C1 01` (partida nueva), `C2 jugador` (tirar:
+  termina el turno ya y se leen las LDR), `C3 jugador` (botón Calibrar /
+  Cancelar) y `C4 jugador paso` (ese visor ya tocó la cabeza en el punto).
 - Poses, `7a1d1003` (escritura sin respuesta + notificación): `D0 jugador`
   + 28 bytes con cabeza, manos y pelota de un visor en mm del tablero (ver
   `lib/ble/pose_frame.dart`). La S3 no las interpreta: guarda la última de
   cada jugador y la reenvía a todos a 20 Hz.
-- Estado (`7a1d1002-…`, lectura + notificación cada 100 ms, 45 bytes): fase,
+- Estado (`7a1d1002-…`, lectura + notificación cada 100 ms, 47 bytes): fase,
   turno, tiempo restante, tablero, ganador, último tiro, posición y referencia
-  de X/Y, casilla de la matriz LDR, enlace UART y la geometría del tablero.
+  de X/Y, casilla de la matriz LDR, enlace UART, la geometría del tablero y
+  la calibración (punto 0-2, quién calibra y quién ya tocó).
 
 **UART** (115200 8N1, líneas de texto con checksum XOR estilo NMEA):
 

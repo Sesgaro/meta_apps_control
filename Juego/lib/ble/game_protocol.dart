@@ -33,6 +33,8 @@ class GameProtocol {
   static const moveHeader = 0xC0;
   static const gameHeader = 0xC1;
   static const fireHeader = 0xC2;
+  static const calibrateHeader = 0xC3;
+  static const touchHeader = 0xC4;
   static const stateHeader = 0xC6;
   static const stateLength = 45;
 
@@ -48,6 +50,14 @@ class GameProtocol {
 
   static Uint8List encodeFire(Player player) =>
       Uint8List.fromList([fireHeader, player.code]);
+
+  /// Botón Calibrar (o Cancelar) de [player]; ver la calibración en la S3.
+  static Uint8List encodeCalibrate(Player player) =>
+      Uint8List.fromList([calibrateHeader, player.code]);
+
+  /// [player] ya tocó la cabeza en el punto [step] (1 o 2) de la calibración.
+  static Uint8List encodeTouch(Player player, int step) =>
+      Uint8List.fromList([touchHeader, player.code, step]);
 
   static Uint8List encodeNewGame() => Uint8List.fromList([gameHeader, 0x01]);
 
@@ -82,6 +92,10 @@ class GameProtocol {
         yStep: mm(42),
       ),
       turnSeconds: bytes[44],
+      // Firmwares sin calibración mandan 45 bytes.
+      calibStep: bytes.length > 46 ? bytes[45] : 0,
+      calibDone: bytes.length > 46 ? bytes[46] & 3 : 0,
+      calibWho: bytes.length > 46 ? bytes[46] >> 4 & 3 : 0,
     );
   }
 
@@ -179,6 +193,9 @@ class GameState {
     required this.yAxisLinked,
     required this.geometry,
     required this.turnSeconds,
+    this.calibStep = 0,
+    this.calibDone = 0,
+    this.calibWho = 0,
   });
 
   final Phase phase;
@@ -205,6 +222,10 @@ class GameState {
   final bool yAxisLinked;
   final BoardGeometry geometry;
   final int turnSeconds;
+
+  /// Calibración de los visores: punto al que va la cabeza (0 = no se
+  /// calibra, 1 o 2) y quién ya lo tocó / quién calibra (bit0 X, bit1 O).
+  final int calibStep, calibDone, calibWho;
 
   bool get isDraw => winner == 3;
   Player get winnerPlayer =>
@@ -235,5 +256,8 @@ class GameState {
     'y0': geometry.y0,
     'yStep': geometry.yStep,
     'turnSeconds': turnSeconds,
+    'calibStep': calibStep,
+    'calibDone': calibDone,
+    'calibWho': calibWho,
   };
 }

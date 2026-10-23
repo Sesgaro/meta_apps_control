@@ -46,6 +46,7 @@ class GameLink extends ChangeNotifier {
   ({Player player, double x, double y})? _pendingMove;
   bool _pendingNewGame = false;
   Player? _pendingFire;
+  final _pendingCalib = <Uint8List>[];
   Uint8List? _pendingPose;
 
   // Reconexión automática si la conexión se cae sola (no al tocar Salir).
@@ -196,6 +197,7 @@ class GameLink extends ChangeNotifier {
     _pendingMove = null;
     _pendingNewGame = false;
     _pendingFire = null;
+    _pendingCalib.clear();
     final d = _device;
     if (d != null && d.isConnected) {
       try {
@@ -218,6 +220,22 @@ class GameLink extends ChangeNotifier {
     if (!isConnected) return;
     if (_sim != null) return _sim!.fire(player);
     _pendingFire = player;
+    if (!_writing) _drain();
+  }
+
+  /// Botón Calibrar (o Cancelar) de [player].
+  void calibrate(Player player) {
+    if (!isConnected) return;
+    if (_sim != null) return _sim!.calibrate(player);
+    _pendingCalib.add(GameProtocol.encodeCalibrate(player));
+    if (!_writing) _drain();
+  }
+
+  /// [player] tocó la cabeza en el punto [step] de la calibración.
+  void touch(Player player, int step) {
+    if (!isConnected) return;
+    if (_sim != null) return _sim!.touch(player, step);
+    _pendingCalib.add(GameProtocol.encodeTouch(player, step));
     if (!_writing) _drain();
   }
 
@@ -248,6 +266,7 @@ class GameLink extends ChangeNotifier {
       while (_pendingNewGame ||
           _pendingMove != null ||
           _pendingFire != null ||
+          _pendingCalib.isNotEmpty ||
           _pendingPose != null) {
         final char = _commandChar;
         if (char == null) break;
@@ -255,7 +274,8 @@ class GameLink extends ChangeNotifier {
         if (pose != null &&
             !_pendingNewGame &&
             _pendingMove == null &&
-            _pendingFire == null) {
+            _pendingFire == null &&
+            _pendingCalib.isEmpty) {
           // Las poses van al final: primero lo que cambia el juego.
           _pendingPose = null;
           await _poseChar?.write(pose, withoutResponse: true);
@@ -269,9 +289,11 @@ class GameLink extends ChangeNotifier {
           final m = _pendingMove!;
           _pendingMove = null;
           frame = GameProtocol.encodeMove(m.player, m.x, m.y);
-        } else {
+        } else if (_pendingFire != null) {
           frame = GameProtocol.encodeFire(_pendingFire!);
           _pendingFire = null;
+        } else {
+          frame = _pendingCalib.removeAt(0);
         }
         await char.write(frame, withoutResponse: true);
       }

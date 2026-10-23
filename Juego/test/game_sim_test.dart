@@ -64,4 +64,21 @@ void main() {
     sim.move(Player.o, 100, 100);
     expect(sim.refX, 0);
   });
+
+  test('calibración: la cabeza va a los dos puntos y termina', () {
+    final sim = GameSim();
+    sim.calibrate(Player.x);
+    expect(sim.state.calibStep, 1);
+    expect((sim.refX, sim.refY), (30.0, 30.0));
+    sim.touch(Player.x, 2); // no es el punto actual
+    expect(sim.calibStep, 1);
+    sim.touch(Player.x, 1);
+    expect((sim.calibStep, sim.refX, sim.refY), (2, 150.0, 150.0));
+    sim.touch(Player.x, 2);
+    expect(sim.calibStep, 0);
+    // Durante una partida no se puede calibrar.
+    sim.newGame();
+    sim.calibrate(Player.x);
+    expect(sim.calibStep, 0);
+  });
 }

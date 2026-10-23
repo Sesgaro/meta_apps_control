@@ -11,6 +11,8 @@ import 'package:flutter/services.dart';
 ///   3D -> 2D      [move]      {x, y} en mm, mover la cabeza
 ///   3D -> 2D      [fire]      tirar: lanzar la pelota / soltar la garra
 ///   3D -> 2D      [newGame]   partida nueva
+///   3D -> 2D      [calibrate] botón Calibrar / Cancelar
+///   3D -> 2D      [touch]     {step} tocaste la cabeza en ese punto de la calibración
 ///   3D -> 2D      [pose]      {data} tu pose (PoseFrame) para el otro visor
 ///   2D -> 3D      [poses]     {data} pose del otro visor
 ///   2D -> 3D      [game]      estado del juego, ver GameState.toMap()
@@ -25,6 +27,8 @@ class PanelBus {
   static const move = 'move';
   static const fire = 'fire';
   static const newGame = 'newGame';
+  static const calibrate = 'calibrate';
+  static const touch = 'touch';
   static const pose = 'pose';
   static const poses = 'poses';
   static const game = 'game';

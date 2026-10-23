@@ -1,12 +1,17 @@
+// Rastreo de cuerpo (articulaciones de los dedos) es API experimental del Spatial SDK.
+@file:OptIn(com.meta.spatial.core.SpatialSDKExperimentalAPI::class)
+
 package com.sesgaro.control_angulos
 
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -27,8 +32,13 @@ import com.meta.spatial.isdk.IsdkGrabMovementType
 import com.meta.spatial.isdk.IsdkGrabState
 import com.meta.spatial.isdk.IsdkGrabbable
 import com.meta.spatial.isdk.IsdkSphereCollider
+import com.meta.spatial.runtime.ButtonBits
+import com.meta.spatial.runtime.ControllerPose
+import com.meta.spatial.runtime.JointType
+import com.meta.spatial.runtime.SkeletonJoint
 import com.meta.spatial.runtime.ReferenceSpace
 import com.meta.spatial.toolkit.AppSystemActivity
+import com.meta.spatial.toolkit.AvatarSystem
 import com.meta.spatial.toolkit.AvatarBody
 import com.meta.spatial.toolkit.Box
 import com.meta.spatial.toolkit.Controller
@@ -46,6 +56,7 @@ import com.meta.spatial.toolkit.ViewPanelRegistration
 import com.meta.spatial.toolkit.Visible
 import com.meta.spatial.toolkit.createPanelEntity
 import com.meta.spatial.vr.VRFeature
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.exp
@@ -64,9 +75,9 @@ import kotlin.random.Random
 ///    casilla libre la pelota se cuela por un hueco, si no rebota y se va.
 ///  - Grúa: un joystick mueve la cabeza y un botón suelta la garra (tirar).
 ///
-/// Dos visores: cada uno calibra el tablero sobre los mismos dos puntos reales
-/// (botón Calibrar: se agarran dos marcadores y se ponen en las esquinas de
-/// tu lado del tablero, izquierda y derecha). Así los dos miden en mm de la
+/// Dos visores: aprietan Calibrar a la vez, la ESP lleva la cabeza real a dos
+/// puntos y cada uno la toca con el índice; con esos dos toques cada visor
+/// acomoda su mesa sobre la máquina (ver GameSystem.calibrate). Así los dos miden en mm de la
 /// máquina y cada uno manda su cabeza y manos (PoseFrame) por la ESP; aquí se
 /// dibuja al otro jugador.
 ///
@@ -86,7 +97,9 @@ class GameActivity3D : AppSystemActivity() {
     private val busListener: (String, Map<*, *>) -> Unit = { method, args ->
         when (method) {
             "game" -> game = args
-            "poses" -> (args["data"] as? ByteArray)?.let {
+            // La ESP reenvía las poses de los dos jugadores: la tuya se ignora
+            // (si no, tapaba la del otro y el personaje parpadeaba).
+            "poses" -> (args["data"] as? ByteArray)?.takeIf { it.size > 1 && (it[1].toInt() and 0xFF) != int("me") }?.let {
                 remotePose = it
                 remoteAt = System.nanoTime()
             }
@@ -111,6 +124,9 @@ class GameActivity3D : AppSystemActivity() {
         super.onCreate(savedInstanceState)
         PanelBus.started(this)
         PanelBus.listen(busListener)
+        if (checkSelfPermission(BODY_TRACKING) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(BODY_TRACKING), 1)
+        }
     }
 
     override fun onDestroy() {
@@ -124,6 +140,8 @@ class GameActivity3D : AppSystemActivity() {
         super.onSceneReady()
         scene.setReferenceSpace(ReferenceSpace.LOCAL_FLOOR)
         scene.enablePassthrough(true)
+        // Las patas de gato reemplazan a las manos transparentes del sistema.
+        systemManager.findSystem<AvatarSystem>().setShowHands(false)
         scene.setLightingEnvironment(
             Vector3(0.35f),
             Vector3(2.2f, 2.1f, 2.0f),
@@ -272,12 +290,23 @@ class GameActivity3D : AppSystemActivity() {
         var scale = 1f
         var calibrated = false
         var calibrating = false
+        /// Pelota "al aire" sobre la cabeza durante la calibración: lo que hay que tocar.
         lateinit var markA: Entity
-        lateinit var markB: Entity
+        lateinit var calibBtn: Entity
+        lateinit var calibAt: Vector3
         var boardW = 0f
 
-        // El otro jugador.
+        // El otro jugador: personaje gato (cabeza, patas) del color de su ficha.
         private val avatar = mutableListOf<Entity>()
+        private val faces = mutableListOf<Entity>()
+
+        // Patas de gato en tus manos (izquierda, derecha): models/pata.glb, con
+        // 2 huesos (palma, dedos) horneados en PAW_FRAMES cuadros de abierta a
+        // cerrada (pata_{x,o}_N.glb, ver tool/pata_a_glb.py): se ve uno a la vez.
+        private val paws = List(2) { mutableListOf<Entity>() }
+        private val pawFrame = intArrayOf(-1, -1)
+        private var pawColor = -1
+        private val pawCurl = FloatArray(2)
         private var avatarColor = -1
 
         /// Metros por mm: el tablero mide [BOARD_M] de ancho.
@@ -356,7 +385,7 @@ class GameActivity3D : AppSystemActivity() {
                 holes += box(root, center + Vector3(-hole, 0.0005f, -hole), center + Vector3(hole, 0.003f, hole), HOLE, Visible(false))
                 // Sensor IR al centro de la casilla.
                 sphere(root, center + Vector3(0f, 0.002f, 0f), cell * 0.04f, GRID)
-                // Fichas: los modelos PiezaX/PiezaO (1 m de ancho, ver tool/stl_a_glb.py).
+                // Fichas: pieza_x/pieza_o (1 m de ancho, ver tool/modelos_a_glb.py).
                 pieces += piece("pieza_x", center, cell * 0.7f) to piece("pieza_o", center, cell * 0.6f)
             }
             // Cabeza en su posición real; la referencia (blanco) sobre la mesa.
@@ -402,19 +431,19 @@ class GameActivity3D : AppSystemActivity() {
             buildSlingshot(h)
             buildClawControls(h)
 
-            // Calibración: esquina izquierda (A, cian) y derecha (B, amarilla)
-            // del borde de tu lado.
-            markA = grabbable(toWorld(Vector3(-w / 2, 0f, h / 2)), MARK_R, MARK_A, IsdkGrabMovementType.Direct)
-            markB = grabbable(toWorld(Vector3(w / 2, 0f, h / 2)), MARK_R, MARK_B, IsdkGrabMovementType.Direct)
-            markA.setComponent(Visible(false))
-            markB.setComponent(Visible(false))
+            markA = worldSphere(MARK_R, MARK_A)
+            // Botón cian a la derecha de tu lado: pide calibrar (o cancela),
+            // igual que el botón Calibrar del letrero, apretándolo con la mano.
+            calibAt = Vector3(w / 2 + 0.12f, 0.02f, h / 2 - 0.03f)
+            calibBtn = grabbable(toWorld(calibAt), 0.02f, MARK_A, IsdkGrabMovementType.None)
 
-            // Otro jugador: cabeza, visor y manos.
-            avatar += worldSphere(0.08f, WHITE)
-            avatar += worldSphere(0.035f, HOLE)
-            avatar += worldSphere(0.03f, WHITE)
-            avatar += worldSphere(0.03f, WHITE)
+            // Otro jugador: cabeza, patas izquierda y derecha, pelota.
+            avatar += model("cabeza_x", HEAD_SIZE)
+            avatar += model("pata_x_0", 1f)
+            avatar += model("pata_x_0", 1f)
             avatar += worldSphere(BALL_R, BALL)
+            for (i in 1..FACES) faces += model("cara_$i", HEAD_SIZE)
+            for (hand in paws) repeat(PAW_FRAMES) { hand += model("pata_x_$it", 1f) }
 
             Entity.createPanelEntity(
                 R.id.game3d_status,
@@ -445,17 +474,23 @@ class GameActivity3D : AppSystemActivity() {
             }
         }
 
-        /// Resortera al centro del borde de tu lado: poste, horquilla y pelota.
+        /// Resortera al centro del borde de tu lado: modelo slingshot.glb, ligas y pelota.
         private fun buildSlingshot(h: Float) {
+            // El modelo (Blender, Y arriba) mide ~7.9 unidades de alto: se escala
+            // y se corre para que el centro de las puntas quede en x = 0.
             val z = h / 2 + SLING_DIST
-            slingRest = Vector3(0f, SLING_H, z)
-            forkL = Vector3(-0.045f, SLING_H + 0.02f, z)
-            forkR = Vector3(0.045f, SLING_H + 0.02f, z)
-            slingParts += box(root, Vector3(-0.006f, 0f, z - 0.006f), Vector3(0.006f, SLING_H - 0.03f, z + 0.006f), WOOD)
-            slingParts += box(root, Vector3(-0.05f, SLING_H - 0.036f, z - 0.006f), Vector3(0.05f, SLING_H - 0.024f, z + 0.006f), WOOD)
-            for (f in listOf(forkL, forkR)) {
-                slingParts += box(root, Vector3(f.x - 0.006f, SLING_H - 0.03f, z - 0.006f), Vector3(f.x + 0.006f, f.y, z + 0.006f), WOOD)
-            }
+            val origin = Vector3(-SLING_FORK_MID.x * SLING_SCALE, 0f, z - SLING_FORK_MID.z * SLING_SCALE)
+            forkL = origin + SLING_TIP_L * SLING_SCALE
+            forkR = origin + SLING_TIP_R * SLING_SCALE
+            slingRest = (forkL + forkR) * 0.5f - Vector3(0f, 0.02f, 0f)
+            slingParts += Entity.create(
+                listOf(
+                    Mesh(Uri.parse("apk:///models/slingshot.glb")),
+                    Transform(Pose(origin, Quaternion())),
+                    Scale(Vector3(SLING_SCALE)),
+                    TransformParent(root),
+                ),
+            )
             repeat(2 * BAND_DOTS) { bands += sphere(root, slingRest, 0.004f, BAND) }
             repeat(TRAJ_DOTS) { dots += sphere(root, slingRest, 0.005f, WHITE, Visible(false)) }
             ball = grabbable(toWorld(slingRest), BALL_R, BALL, IsdkGrabMovementType.Direct)
@@ -489,43 +524,33 @@ class GameActivity3D : AppSystemActivity() {
             placed = true
         }
 
-        /// Empieza o termina la calibración. Al terminar, la mesa se acomoda
-        /// para que sus esquinas de tu lado queden en los marcadores.
-        fun toggleCalibration() {
-            if (!calibrating) {
-                setWorld(markA, Vector3(-boardW / 2, 0f, halfH))
-                setWorld(markB, Vector3(boardW / 2, 0f, halfH))
-                listOf(markA, markB).forEach {
-                    it.setComponent(Visible(true))
-                    setGrabbable(it, true)
-                }
-                calibrating = true
-                return
-            }
-            val a = markA.getComponent<Transform>().transform.t - Vector3(0f, MARK_R, 0f)
-            val b = markB.getComponent<Transform>().transform.t - Vector3(0f, MARK_R, 0f)
-            listOf(markA, markB).forEach {
-                it.setComponent(Visible(false))
-                setGrabbable(it, false)
-            }
-            calibrating = false
-            val d = Vector3(b.x - a.x, 0f, b.z - a.z)
-            if (d.length() < 0.05f) return // marcadores encimados: se ignora
-            val yaw = atan2(-d.z, d.x)
+        /// Acomoda la mesa con los dos toques de la calibración: [world] es la
+        /// punta de tu índice al tocar la cabeza y [mm] dónde estaba la cabeza
+        /// (x, y de la máquina). Dos puntos dan el giro, la escala y la posición.
+        fun applyCalibration(world: List<Vector3>, mm: List<Pair<Float, Float>>) {
+            val la = local(mm[0].first, mm[0].second)
+            val lb = local(mm[1].first, mm[1].second)
+            val dl = lb - la
+            val dw = Vector3(world[1].x - world[0].x, 0f, world[1].z - world[0].z)
+            if (dw.length() < 0.05f || dl.length() < 1e-4f) return // toques encimados: se ignora
+            val yaw = atan2(-dw.z, dw.x) - atan2(-dl.z, dl.x)
             val q = Quaternion(cos(yaw / 2), 0f, sin(yaw / 2), 0f)
-            scale = d.length() / boardW
-            val mid = (a + b) * 0.5f
+            scale = dw.length() / dl.length()
+            // El dedo toca arriba de la cabeza real, HEAD_TOUCH_M sobre la mesa.
+            val up = Vector3(0f, HEAD_TOUCH_M, 0f)
+            val t = (world[0] - up - q * (la * scale) + world[1] - up - q * (lb * scale)) * 0.5f
             calibrated = true
-            place(Pose(mid + q * Vector3(0f, 0f, -halfH * scale), q))
+            place(Pose(t, q))
             savedCalibration = rootPose to scale
         }
 
         /// Dibuja al otro jugador con su pose (PoseFrame), o lo oculta (null).
-        fun drawAvatar(f: ByteArray?, me: Int) {
+        /// [face]: expresión (1..4, ver tool/cabeza_a_glb.py) del jugador 1 o 2.
+        fun drawAvatar(f: ByteArray?, me: Int, face: (Int) -> Int) {
             val ok = f != null && f.size == POSE_LENGTH && (f[0].toInt() and 0xFF) == POSE_HEADER &&
                 (f[1].toInt() and 0xFF) != me
             if (!ok) {
-                avatar.forEach { it.setComponent(Visible(false)) }
+                (avatar + faces).forEach { it.setComponent(Visible(false)) }
                 return
             }
             f!!
@@ -537,21 +562,62 @@ class GameActivity3D : AppSystemActivity() {
             val other = if (id == 1 || id == 2) id else 3 - me
             if (other != avatarColor) {
                 avatarColor = other
-                val c = if (other == 1) PIECE_X else PIECE_O
-                listOf(0, 2, 3).forEach { avatar[it].setComponent(material(c)) }
+                avatar[0].setComponent(Mesh(Uri.parse("apk:///models/cabeza_${tag(other)}.glb")))
+                avatar[1].setComponent(Mesh(Uri.parse("apk:///models/pata_${tag(other)}_0.glb")))
+                avatar[2].setComponent(Mesh(Uri.parse("apk:///models/pata_${tag(other)}_0.glb")))
             }
             val head = point(2)
             val fwd = rootPose.q * Vector3(f[8] / 127f, f[10] / 127f, -f[9] / 127f)
-            show(avatar[0], head, true)
-            show(avatar[1], head + fwd * 0.07f, true)
-            show(avatar[2], point(11), flags and 1 != 0)
-            show(avatar[3], point(17), flags and 2 != 0)
-            show(avatar[4], point(23), flags and 4 != 0 && !clawMode())
+            // Solo el giro horizontal: la cabeza (cara hacia -Z) mira a donde mira él.
+            val yaw = atan2(-fwd.x, -fwd.z)
+            val q = Quaternion(cos(yaw / 2), 0f, sin(yaw / 2), 0f)
+            show(avatar[0], head, true, q)
+            val expr = face(other)
+            for ((i, e) in faces.withIndex()) show(e, head, i + 1 == expr, q)
+            show(avatar[1], point(11), flags and 1 != 0, q)
+            show(avatar[2], point(17), flags and 2 != 0, q)
+            show(avatar[3], point(23), flags and 4 != 0 && !clawMode())
         }
 
-        private fun show(e: Entity, world: Vector3, visible: Boolean) {
+        private fun tag(player: Int) = if (player == 1) "x" else "o"
+
+        /// Modelo de models/ suelto en el mundo, oculto hasta que se use.
+        private fun model(name: String, size: Float, vararg more: ComponentBase) = Entity.create(
+            listOf(
+                Mesh(Uri.parse("apk:///models/$name.glb")),
+                Transform(Pose(Vector3(0f, -10f, 0f), Quaternion())),
+                Scale(Vector3(size)),
+                Visible(false),
+            ) + more,
+        )
+
+        /// La animación "cerrar" dura 1 s: congelada en t = 0 (abierta) … 1 (cerrada).
+        /// Pone cada pata en su mano y la cierra con ella (cuadro 0 abierta … último cerrada).
+        fun drawPaws(hands: List<Pair<Pose, Float>?>, me: Int, dt: Float) {
+            if (me != pawColor) {
+                pawColor = me
+                for (hand in paws) hand.forEachIndexed { f, e -> e.setComponent(Mesh(Uri.parse("apk:///models/pata_${tag(me)}_$f.glb"))) }
+            }
+            for ((i, h) in hands.withIndex()) {
+                val frame = if (h == null) -1 else {
+                    val target = h.second
+                    pawCurl[i] += (target - pawCurl[i]) * min(1f, dt * 15f)
+                    (pawCurl[i] * (PAW_FRAMES - 1) + 0.5f).toInt()
+                }
+                if (frame != pawFrame[i]) {
+                    if (pawFrame[i] >= 0) paws[i][pawFrame[i]].setComponent(Visible(false))
+                    if (frame >= 0) paws[i][frame].setComponent(Visible(true))
+                    pawFrame[i] = frame
+                }
+                // La mano derecha viene volteada respecto a la izquierda: 180° más a lo largo.
+                val rot = if (i == 1) RIGHT_FLIP * PAW_ROT else PAW_ROT
+                if (h != null) paws[i][frame].setComponent(Transform(Pose(h.first.t, h.first.q * rot)))
+            }
+        }
+
+        private fun show(e: Entity, world: Vector3, visible: Boolean, q: Quaternion = Quaternion()) {
             e.setComponent(Visible(visible))
-            if (visible) e.setComponent(Transform(Pose(world, Quaternion())))
+            if (visible) e.setComponent(Transform(Pose(world, q)))
         }
 
         private fun worldSphere(r: Float, color: Color4) = Entity.create(
@@ -652,10 +718,10 @@ class GameActivity3D : AppSystemActivity() {
             }
             target.setComponent(Transform(Pose(local(num("refX"), num("refY"), 0.004f), Quaternion())))
 
-            val bl = if (mine) 1 else 0
+            val bl = if (calibrating) 2 else if (mine) 1 else 0
             if (bl != baseLook) {
                 baseLook = bl
-                base.setComponent(material(if (mine) BASE_MINE else BASE_LOCKED))
+                base.setComponent(material(when (bl) { 2 -> BASE_CALIB; 1 -> BASE_MINE; else -> BASE_LOCKED }))
             }
             val ml = if (claw) 1 else 0
             if (ml != modeLook) {
@@ -796,6 +862,83 @@ class GameActivity3D : AppSystemActivity() {
         private var clawX = Float.NaN
         private var clawY = Float.NaN
         private var buttonDown = false
+        private var calibDown = false
+        private var frameHands: List<Pair<Pose, Float>?> = listOf(null, null)
+
+        // Calibración tocando la cabeza real (la lleva la ESP a dos puntos).
+        private val touchWorld = arrayOfNulls<Vector3>(2)
+        private val touchMm = arrayOfNulls<Pair<Float, Float>>(2)
+        private val tipHistory = ArrayDeque<Pair<Long, Vector3>>()
+        private var prevCalib = 0
+        private var calibAskedAt = 0L
+
+        private fun calibLabel() {
+            val label = if (scene3d.calibrating) "Cancelar" else "Calibrar"
+            calibButton?.let { b -> b.post { b.text = label } }
+        }
+
+        /// ¿[p] lleva [STILL_NS] sin moverse más de [tol]? [h]: historial (tiempo, posición).
+        private fun still(h: ArrayDeque<Pair<Long, Vector3>>, p: Vector3, now: Long, tol: Float): Boolean {
+            h.addLast(now to p)
+            while (h.size > 1 && now - h[1].first >= STILL_NS) h.removeFirst()
+            return now - h.first().first >= STILL_NS && h.all { it.second.distanceTo(p) < tol }
+        }
+
+        /// Sigue la calibración de la ESP (calibStep): pinta la pelota sobre la
+        /// cabeza y, cuando la cabeza llegó al punto, toma la punta de tu índice
+        /// quieto como ese punto y avisa (touch). Al terminar, acomoda la mesa.
+        private fun calibrate(now: Long) {
+            val s = scene3d
+            val step = int("calibStep")
+            if (step != prevCalib) {
+                if (prevCalib == 0) touchWorld.fill(null)
+                if (prevCalib == 2 && step == 0 && touchWorld.all { it != null }) {
+                    s.applyCalibration(touchWorld.map { it!! }, touchMm.map { it!! })
+                    sfx?.play(Sfx.Sound.TURN)
+                }
+                prevCalib = step
+                s.calibrating = step != 0
+                s.markA.setComponent(Visible(step != 0))
+                tipHistory.clear()
+                calibLabel()
+            }
+            if (step == 0) return
+            val x = num("posX")
+            val y = num("posY")
+            s.markA.setComponent(Transform(Pose(s.toWorld(s.local(x, y, HEAD_TOUCH_M / s.scale)), Quaternion())))
+            val bit = 1 shl (int("me") - 1)
+            val arrived = abs(x - num("refX")) < 3f && abs(y - num("refY")) < 3f
+            val tip = pointingTip()
+            if (int("calibWho") and bit == 0 || touchWorld[step - 1] != null || !arrived || tip == null) {
+                tipHistory.clear()
+                return
+            }
+            if (!still(tipHistory, tip, now, STILL_M)) return
+            touchWorld[step - 1] = tip
+            touchMm[step - 1] = num("refX") to num("refY")
+            Log.d("Gato3D", "calibración punto $step: índice $tip, mano ${frameHands.map { it?.first?.t }}")
+            sfx?.play(Sfx.Sound.TICK)
+            PanelBus.send(this@GameActivity3D, "touch", mapOf("step" to step))
+        }
+
+        private fun calibNote(): String {
+            val step = int("calibStep")
+            if (step == 0) {
+                return when {
+                    System.nanoTime() - calibAskedAt >= CALIB_WAIT_NS -> ""
+                    int("phase") == 1 || int("phase") == 2 -> "Para calibrar, espera a que termine la partida"
+                    else -> "Esperando a que el otro jugador apriete Calibrar…"
+                }
+            }
+            val bit = 1 shl (int("me") - 1)
+            return when {
+                int("calibWho") and bit == 0 -> "El otro jugador está calibrando"
+                touchWorld[step - 1] != null -> "Punto $step listo. Esperando al otro jugador…"
+                abs(num("posX") - num("refX")) >= 3f || abs(num("posY") - num("refY")) >= 3f -> "Calibrando: la cabeza va al punto $step de 2…"
+                else -> "Calibrando (punto $step de 2): toca la cabeza con la punta del índice y quédate quieto"
+            }
+        }
+
         private var remoteClawDown = false
         private var lastPoseAt = 0L
 
@@ -803,6 +946,7 @@ class GameActivity3D : AppSystemActivity() {
         private var prevPhase = -1
         private var prevMine = false
         private var prevTick = -1
+        private var resultAt = 0L
         private var hadRemote = false
         private var note = ""
 
@@ -823,21 +967,32 @@ class GameActivity3D : AppSystemActivity() {
             val now = System.nanoTime()
             val dt = if (lastFrame == 0L) 0f else min((now - lastFrame) / 1e9f, 0.05f)
             lastFrame = now
+            frameHands = handStates()
 
+            val calPressed = scene3d.grabbed(scene3d.calibBtn) || handNear(scene3d.toWorld(scene3d.calibAt), BUTTON_REACH)
+            scene3d.setWorld(scene3d.calibBtn, scene3d.calibAt - Vector3(0f, if (calPressed) 0.01f else 0f, 0f))
+            if (calPressed && !calibDown) calibToggle = true
+            calibDown = calPressed
             if (calibToggle) {
                 calibToggle = false
-                scene3d.toggleCalibration()
-                val label = if (scene3d.calibrating) "Listo" else "Calibrar"
-                calibButton?.let { b -> b.post { b.text = label } }
+                calibAskedAt = if (scene3d.calibrating) 0L else System.nanoTime()
+                PanelBus.send(this@GameActivity3D, "calibrate")
             }
             sendPose(viewer, now)
             val remote = remotePose.takeIf { now - remoteAt < REMOTE_STALE_NS }
-            scene3d.drawAvatar(remote, int("me"))
+            calibrate(now)
+            scene3d.drawAvatar(remote, int("me"), ::face)
             remoteClawDown = remote != null && remote.size == POSE_LENGTH && remote[29].toInt() and 8 != 0
             if (remote != null) hadRemote = true
-            note = if (hadRemote && remote == null) "El otro visor no envía su posición" else ""
+            val calibText = calibNote()
+            note = when {
+                calibText.isNotEmpty() -> calibText
+                hadRemote && remote == null -> "El otro visor no envía su posición"
+                else -> ""
+            }
             events()
             scene3d.animate(dt)
+            scene3d.drawPaws(frameHands, int("me"), dt)
 
             trackResult(now)
             // Lo del otro modo está oculto: que tampoco se pueda agarrar.
@@ -855,8 +1010,22 @@ class GameActivity3D : AppSystemActivity() {
         // --- Resultado del tiro ------------------------------------------------------
 
         /// Sonidos de turno, cuenta regresiva y fin de partida; confeti al ganar.
+        /// Expresión del personaje de [player]: 4 si acertó o ganó, 3 si perdió la
+        /// partida, 2 si su último tiro falló (unos segundos), 1 si no.
+        private fun face(player: Int): Int {
+            if (int("phase") == 3) {
+                val w = int("winner")
+                return if (w == player) 4 else if (w == 1 || w == 2) 3 else 1
+            }
+            if (int("lastPlayer") == player && System.nanoTime() - resultAt < FACE_NS) {
+                return if (int("lastResult") == 1) 4 else 2
+            }
+            return 1
+        }
+
         private fun events() {
             val phase = int("phase")
+            if (prevPhase == 2 && phase != 2) resultAt = System.nanoTime()
             val mine = canMove()
             if (mine && !prevMine) sfx?.play(Sfx.Sound.TURN)
             val tick = if (mine) num("timeLeft").toInt() else -1
@@ -1066,17 +1235,77 @@ class GameActivity3D : AppSystemActivity() {
             }
         }
 
-        /// Posición de cada mano rastreada (izquierda, derecha; null si no se ve).
-        private fun hands(): List<Vector3?> {
+        /// Pose de cada mano rastreada (izquierda, derecha) y qué tan cerrada está
+        /// (0 abierta … 1 puño); null si no se ve.
+        private fun handStates(): List<Pair<Pose, Float>?> {
+            val curls = handCurls()
             val body = Query.where { has(AvatarBody.id) }.eval()
                 .filter { it.isLocal() && it.getComponent<AvatarBody>().isPlayerControlled }
                 .firstOrNull()?.getComponent<AvatarBody>() ?: return listOf(null, null)
-            return listOf(body.leftHand, body.rightHand).map { h ->
+            return listOf(body.leftHand, body.rightHand).mapIndexed { i, h ->
                 val c = h.tryGetComponent<Controller>()
                 val p = h.tryGetComponent<Transform>()?.transform
-                if (c != null && p != null && c.isActive && c.type == ControllerType.HAND) p.t else null
+                if (c != null && p != null && c.isActive && c.type == ControllerType.HAND) {
+                    val sig = c.buttonState.toLong() shl 32 or c.directTouchButtonState.toLong()
+                    if (lastHandSig[h.id] != sig) {
+                        lastHandSig[h.id] = sig
+                        Log.d("Gato3D", "mano ${h.id}: botones ${Integer.toBinaryString(c.buttonState)} toque ${Integer.toBinaryString(c.directTouchButtonState)}")
+                    }
+                    p to (curls?.get(i) ?: if (c.buttonState and HAND_CLOSED != 0) 1f else 0f)
+                } else null
             }
         }
+
+        private val lastHandSig = HashMap<Long, Long>()
+        private val bodyPoses = ArrayList<ControllerPose>()
+        private val bodySkeleton = ArrayList<SkeletonJoint>()
+        private var bodyOk: Boolean? = null
+
+        private fun joint(j: JointType) =
+            bodyPoses.getOrNull(j.ordinal)?.takeIf { it.flags and ControllerPose.ValidBits != 0 }?.pose?.t
+
+        /// Punta del índice de la mano que apunta (índice estirado, medio
+        /// doblado), de la derecha primero; null si ninguna. Usa el rastreo de
+        /// cuerpo de este cuadro (lo actualiza handCurls).
+        private fun pointingTip(): Vector3? {
+            if (bodyOk != true) return null
+            val hands = listOf(
+                Triple(JointType.RIGHT_HAND_PALM, JointType.RIGHT_HAND_INDEX_TIP, JointType.RIGHT_HAND_MIDDLE_TIP),
+                Triple(JointType.LEFT_HAND_PALM, JointType.LEFT_HAND_INDEX_TIP, JointType.LEFT_HAND_MIDDLE_TIP),
+            )
+            for ((palm, index, middle) in hands) {
+                val p = joint(palm) ?: continue
+                val i = joint(index) ?: continue
+                val m = joint(middle) ?: continue
+                if (i.distanceTo(p) > POINT_INDEX_M && m.distanceTo(p) < POINT_MIDDLE_M) return i
+            }
+            return null
+        }
+
+        /// Qué tan cerrada está cada mano (izquierda, derecha), por la distancia de
+        /// las puntas de los dedos a la palma en el rastreo de cuerpo; null sin datos.
+        private fun handCurls(): FloatArray? {
+            val ok = scene.updateBodyTrackingBuffersAtTime(bodyPoses, bodySkeleton, 0L)
+            if (ok != bodyOk) {
+                bodyOk = ok
+                Log.d("Gato3D", "rastreo de cuerpo: $ok (${bodyPoses.size} articulaciones)")
+            }
+            if (!ok) return null
+            fun curl(palm: JointType, tips: List<JointType>): Float? {
+                val p = bodyPoses.getOrNull(palm.ordinal)?.takeIf { it.flags and ControllerPose.ValidBits != 0 } ?: return null
+                val d = tips.mapNotNull { bodyPoses.getOrNull(it.ordinal)?.takeIf { j -> j.flags and ControllerPose.ValidBits != 0 } }
+                    .map { it.pose.t.distanceTo(p.pose.t) }
+                if (d.isEmpty()) return null
+                return ((CURL_OPEN_M - d.average().toFloat()) / (CURL_OPEN_M - CURL_FIST_M)).coerceIn(0f, 1f)
+            }
+            val l = curl(JointType.LEFT_HAND_PALM, listOf(JointType.LEFT_HAND_INDEX_TIP, JointType.LEFT_HAND_MIDDLE_TIP, JointType.LEFT_HAND_RING_TIP, JointType.LEFT_HAND_LITTLE_TIP))
+            val r = curl(JointType.RIGHT_HAND_PALM, listOf(JointType.RIGHT_HAND_INDEX_TIP, JointType.RIGHT_HAND_MIDDLE_TIP, JointType.RIGHT_HAND_RING_TIP, JointType.RIGHT_HAND_LITTLE_TIP))
+            if (l == null && r == null) return null
+            return floatArrayOf(l ?: 0f, r ?: 0f)
+        }
+
+        /// Posición de cada mano rastreada (izquierda, derecha; null si no se ve).
+        private fun hands(): List<Vector3?> = frameHands.map { it?.first?.t }
 
         /// ¿Alguna mano rastreada a menos de [r] m de [world]?
         private fun handNear(world: Vector3, r: Float) = hands().any { it != null && it.distanceTo(world) < r }
@@ -1103,9 +1332,9 @@ class GameActivity3D : AppSystemActivity() {
             f[9] = (-d.z * 127).toInt().toByte()
             f[10] = (d.y * 127).toInt().toByte()
             var flags = 0
-            val (left, right) = hands()
-            left?.let { put(11, it); flags = flags or 1 }
-            right?.let { put(17, it); flags = flags or 2 }
+            val (left, right) = frameHands
+            left?.let { put(11, it.first.t); flags = flags or 1 or (if (it.second >= FIST_CURL) 0x10 else 0) }
+            right?.let { put(17, it.first.t); flags = flags or 2 or (if (it.second >= FIST_CURL) 0x20 else 0) }
             if (!clawMode()) {
                 put(23, s.ball.getComponent<Transform>().transform.t)
                 flags = flags or 4
@@ -1165,7 +1394,12 @@ class GameActivity3D : AppSystemActivity() {
 
         // Resortera. La gravedad es menor a la real para que el vuelo se vea.
         const val SLING_DIST = 0.1f        // m del borde de la mesa a la resortera
-        const val SLING_H = 0.12f          // m, altura de la pelota en reposo
+        // slingshot.glb, en unidades del modelo: puntas de la horquilla (las
+        // imprime tool/modelos_a_glb.py) y su punto medio.
+        val SLING_TIP_L = Vector3(-2.00f, 7.67f, -0.05f)
+        val SLING_TIP_R = Vector3(2.00f, 7.85f, 0.05f)
+        val SLING_FORK_MID = (SLING_TIP_L + SLING_TIP_R) * 0.5f
+        const val SLING_SCALE = 0.018f     // puntas a ~14 cm de la mesa
         const val BALL_R = 0.02f
         const val MAX_PULL = 0.25f         // m que se puede jalar la liga
         const val MIN_PULL = 0.03f         // menos que esto no cuenta como tiro
@@ -1200,6 +1434,7 @@ class GameActivity3D : AppSystemActivity() {
 
         val BASE_LOCKED = Color4(0.20f, 0.17f, 0.19f, 1f)
         val BASE_MINE = Color4(0.42f, 0.10f, 0.24f, 1f)      // tu turno: rosa oscuro
+        val BASE_CALIB = Color4(0.10f, 0.55f, 0.20f, 1f)     // calibrando: verde
         val GRID = Color4(0.85f, 0.78f, 0.80f, 1f)
         val IR = Color4(0.20f, 0.75f, 0.85f, 1f)
         val PLACED = Color4(0.30f, 0.75f, 0.40f, 1f)
@@ -1207,12 +1442,40 @@ class GameActivity3D : AppSystemActivity() {
         val HOLE = Color4(0.02f, 0.02f, 0.02f, 1f)
         val HEAD = Color4(1.0f, 0.62f, 0.18f, 1f)
         val CLAW = Color4(0.75f, 0.75f, 0.80f, 1f)
-        val WOOD = Color4(0.55f, 0.36f, 0.20f, 1f)
         val BAND = Color4(0.85f, 0.15f, 0.15f, 1f)
         val BALL = Color4(0.95f, 0.20f, 0.20f, 1f)
         val CONSOLE = Color4(0.15f, 0.15f, 0.18f, 1f)
         val BUTTON = Color4(0.95f, 0.10f, 0.20f, 1f)
         val WHITE = Color4(1f, 1f, 1f, 1f)
+
+        // Personaje gato.
+        const val HEAD_SIZE = 0.2f         // m, diámetro de la cabeza
+        const val FACES = 4
+        const val FACE_NS = 4_000_000_000L // cuánto dura la cara de acierto o fallo
+        // Distancia media de las puntas de los dedos a la palma: abierta / puño.
+        // shortcut: medidas de una mano adulta típica; ajustar si no cierra completo.
+        const val CURL_OPEN_M = 0.085f
+        const val CURL_FIST_M = 0.045f
+        const val FIST_CURL = 0.7f         // mano "cerrada" en la trama de pose
+        // Calibración tocando la cabeza: el índice quieto este tiempo cuenta como toque.
+        const val STILL_NS = 800_000_000L
+        const val STILL_M = 0.01f
+        // shortcut: altura supuesta de la parte de arriba de la cabeza real sobre
+        // la mesa; medirla en la máquina (si no, el tablero queda alto o bajo).
+        const val HEAD_TOUCH_M = 0.04f
+        // Apuntar: punta del índice lejos de la palma y la del medio cerca.
+        const val POINT_INDEX_M = 0.075f
+        const val POINT_MIDDLE_M = 0.065f
+        const val CALIB_WAIT_NS = 2_500_000_000L  // la ESP espera 2 s el botón del otro
+        const val BODY_TRACKING = "com.oculus.permission.BODY_TRACKING"
+        const val PAW_FRAMES = 4           // igual que CUADROS en tool/pata_a_glb.py
+        // La pata (dedos -Z, cojinetes -Y) se voltea a lo largo (dedos a +Z, como
+        // la pose de la mano en el visor) y se gira 90° para que los cojinetes
+        // queden en la palma. Medido a ojo en el Quest 3.
+        val RIGHT_FLIP = Quaternion(0f, 0f, 0f, 1f)
+        val PAW_ROT = Quaternion(0.70710677f, 0f, 0f, 0.70710677f) * Quaternion(0f, 0f, 1f, 0f)
+        val HAND_CLOSED = ButtonBits.ButtonTriggerL or ButtonBits.ButtonTriggerR or
+            ButtonBits.ButtonSqueezeL or ButtonBits.ButtonSqueezeR
         val GOLD = Color4(1.0f, 0.80f, 0.15f, 1f)
         val CONFETTI_COLORS = listOf(GOLD, Color4(0.2f, 0.8f, 1f, 1f), Color4(1f, 0.3f, 0.6f, 1f), Color4(0.4f, 1f, 0.4f, 1f))
         const val CONFETTI = 40
@@ -1226,8 +1489,6 @@ class GameActivity3D : AppSystemActivity() {
         /// Calibración de esta sesión de la app (mesa y escala). Se pierde al
         /// cerrar la app: el visor cambia de coordenadas entre sesiones.
         var savedCalibration: Pair<Pose, Float>? = null
-        val PIECE_X = Color4(0.74f, 0.0f, 0.29f, 1f)        // rosa del tema
-        val PIECE_O = Color4(0.95f, 0.85f, 0.90f, 1f)
         val MARK_A = Color4(0.10f, 0.85f, 0.95f, 1f)
         val MARK_B = Color4(1.0f, 0.85f, 0.10f, 1f)
     }

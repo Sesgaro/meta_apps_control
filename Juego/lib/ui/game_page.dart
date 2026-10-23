@@ -142,6 +142,10 @@ class _GamePageState extends State<GamePage> {
         _fire();
       case PanelBus.newGame:
         _link.newGame();
+      case PanelBus.calibrate:
+        _link.calibrate(_player);
+      case PanelBus.touch:
+        _link.touch(_player, (args['step'] as num).toInt());
       case PanelBus.pose:
         if (args['data'] case final Uint8List data) _link.sendPose(data);
     }
