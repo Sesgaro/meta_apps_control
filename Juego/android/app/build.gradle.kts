@@ -36,13 +36,13 @@ android {
     productFlavors {
         create("phone") {
             dimension = "device"
-            manifestPlaceholders["appLabel"] = "Gato cartesiano"
+            manifestPlaceholders["appLabel"] = "Tic-Cat-Toe"
         }
         create("quest") {
             dimension = "device"
             applicationIdSuffix = ".quest"
             versionNameSuffix = "-quest"
-            manifestPlaceholders["appLabel"] = "Gato cartesiano (Quest)"
+            manifestPlaceholders["appLabel"] = "Tic-Cat-Toe (Quest)"
             // Sin esto R8 rompe el Spatial SDK en release (ver el archivo).
             proguardFiles("proguard-quest.pro")
             // Horizon OS de Quest 3 es Android 12L+; además, sin

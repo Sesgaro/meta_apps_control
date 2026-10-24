@@ -22,7 +22,7 @@ class GatoApp extends StatelessWidget {
   }
 
   Widget _app(ColorScheme? light, ColorScheme? dark) => MaterialApp(
-    title: 'Gato cartesiano',
+    title: 'Tic-Cat-Toe',
     debugShowCheckedModeBanner: false,
     theme: buildExpressiveTheme(
       brightness: Brightness.light,

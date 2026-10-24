@@ -365,10 +365,22 @@ class _Title extends StatelessWidget {
         borderRadius: ExpressiveShapes.pill,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-          child: Text(
-            'Gato cartesiano',
-            style: Theme.of(context).textTheme.headlineSmall
-                ?.copyWith(color: scheme.onPrimaryContainer),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Image.asset(
+                'assets/logo.png',
+                height: 36,
+                color: scheme.onPrimaryContainer,
+                semanticLabel: 'Logo',
+              ),
+              const SizedBox(width: 12),
+              Text(
+                'Tic-Cat-Toe',
+                style: Theme.of(context).textTheme.headlineSmall
+                    ?.copyWith(color: scheme.onPrimaryContainer),
+              ),
+            ],
           ),
         ),
       ),

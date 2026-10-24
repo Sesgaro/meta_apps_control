@@ -1,4 +1,4 @@
-# Gato cartesiano
+# Tic-Cat-Toe (gato cartesiano)
 
 Gato (tic-tac-toe) jugado con una máquina cartesiana X/Y desde dos Meta Quest.
 Cada jugador, en su turno, arrastra la cabeza de la máquina sobre un tablero
@@ -34,7 +34,7 @@ Parte del proyecto `App` (control de ángulos por BLE); el firmware del eje X
 
 1. Enciende las dos ESP con la cabeza en la **esquina mínima** (X e Y): los
    encoders son incrementales y esa posición es 0 mm.
-2. En cada Quest abre **Gato cartesiano**, toca **Conectar** →
+2. En cada Quest abre **Tic-Cat-Toe**, toca **Conectar** →
    `ESP32S3-Gato`, y elige **Jugador X** o **Jugador O** (uno cada visor).
 3. **Nuevo juego**. Quien empieza se alterna entre partidas.
 4. Elige el **Modo de juego** en el panel. El tablero 3D se abre solo al
@@ -44,8 +44,12 @@ Parte del proyecto `App` (control de ángulos por BLE); el firmware del eje X
      apuntas, unos puntos marcan la trayectoria y la cabeza de la máquina va a
      donde caería. Al soltar se tira el turno: si la matriz LDR ve la cabeza en
      una casilla libre la pelota se cuela por un hueco; si no, rebota.
-   - **Grúa**: inclina el joystick (izquierda) para mover la cabeza y aprieta
-     el botón rojo (derecha) para soltar la garra y tirar.
+   - **Grúa**: inclina el joystick (izquierda) y la cabeza avanza hacia allá
+     mientras lo tengas inclinado; al soltarlo se detiene. Aprieta el botón
+     rojo (derecha) para soltar la garra y tirar.
+   Cada visor elige su modo. Los jugadores quedan frente a frente con el
+   tablero en medio (el jugador O del lado de Y máxima, con la mesa girada
+   media vuelta), y cada uno ve al otro con su resortera o su grúa enfrente.
    Los modelos fuente están en `modelos/` (exportados de Blender) y se
    convierten a `android/app/src/quest/assets/models/` con:
    - `python3 tool/modelos_a_glb.py`: fichas (`cross2.glb`, `circle2.glb`) y

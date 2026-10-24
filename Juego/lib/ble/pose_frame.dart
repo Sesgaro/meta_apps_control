@@ -13,7 +13,8 @@ import 'game_protocol.dart';
 ///   [11..16] mano izquierda         [17..22] mano derecha
 ///   [23..28] pelota                 [29] banderas: bit0 mano izq, bit1 mano
 ///                                        der, bit2 pelota, bit3 garra abajo,
-///                                        bit4 puño izq, bit5 puño der
+///                                        bit4 puño izq, bit5 puño der,
+///                                        bit6 juega con grúa
 class PoseFrame {
   PoseFrame._();
 
